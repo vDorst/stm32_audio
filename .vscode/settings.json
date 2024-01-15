@@ -1,0 +1,9 @@
+{
+    "rust-analyzer.cargo.target": "thumbv7em-none-eabihf",
+    "rust-analyzer.checkOnSave.allTargets": false,
+    "rust-analyzer.cargo.allFeatures": false,
+    "rust-analyzer.checkOnSave.enable": true,
+    "rust-analyzer.linkedProjects": [
+        "./Cargo.toml"
+    ]
+}
