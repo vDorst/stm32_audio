@@ -6,7 +6,7 @@
 use core::borrow::BorrowMut;
 use core::fmt::Write;
 use cortex_m::peripheral::NVIC;
-use defmt::*;
+use defmt::{info, println, unwrap};
 use embassy_executor::Spawner;
 use embassy_stm32::gpio::Output;
 use embassy_stm32::i2c::{Config as I2CConfig, I2c};
@@ -33,6 +33,7 @@ bind_interrupts!(struct Irqs {
 use embassy_stm32::i2s::{Config as I2SConfig, Format, I2S};
 use static_cell::StaticCell;
 
+mod audio;
 mod usb_audio_class;
 
 const SAMPLES_1K_HZ: [u16; 48] = [
@@ -59,13 +60,16 @@ static DEVICE_DESC: StaticCell<[u8; 256]> = StaticCell::new();
 static CONFIG_DESC: StaticCell<[u8; 256]> = StaticCell::new();
 static BOS_DESC: StaticCell<[u8; 256]> = StaticCell::new();
 // static MSOS_DESC: StaticCell<[u8; 128]> = StaticCell::new();
-static CONTROL_BUF: StaticCell<[u8; 128]> = StaticCell::new();
+static CONTROL_BUF: StaticCell<[u8; 256]> = StaticCell::new();
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
     let mut config = Config::default();
     {
-        use embassy_stm32::rcc::*;
+        use embassy_stm32::rcc::{
+            AHBPrescaler, APBPrescaler, Hse, HseMode, Pll, PllMul, PllPDiv, PllPreDiv, PllQDiv,
+            PllRDiv, PllSource, Sysclk,
+        };
         config.rcc.hse = Some(Hse {
             freq: Hertz(25_000_000),
             mode: HseMode::Oscillator,
@@ -204,7 +208,7 @@ async fn main(spawner: Spawner) {
         CONFIG_DESC.init([0; 256]),
         BOS_DESC.init([0; 256]),
         &mut [], // no msos descriptors
-        CONTROL_BUF.init([0; 128]),
+        CONTROL_BUF.init([0; 256]),
     );
 
     let mut class = usb_audio_class::AudioClass::new(&mut builder, 1, 1, 64);
@@ -215,10 +219,10 @@ async fn main(spawner: Spawner) {
     // Run the USB device.
     unwrap!(spawner.spawn(usb_runner(usb)));
 
-    info!("write I2S");
-    for _ in 0u32..5000 {
-        unwrap!(i2s.writer(&write));
-    }
+    // info!("write I2S");
+    // for _ in 0u32..5000 {
+    //     unwrap!(i2s.writer(&write));
+    // }
 
     info!("write done");
 
@@ -228,7 +232,19 @@ async fn main(spawner: Spawner) {
 
     let mut old: u32 = tmr2.get_cc1();
 
+    let mut packet_buf: [u8; 200] = [0; 200];
+
     loop {
+        class.wait_connection().await;
+        led_status.toggle();
+        unwrap!(class.write_packet(&[0x00, 0x00, 0x00]).await);
+
+        unwrap!(
+            class
+                .read_packet(&mut packet_buf[0..class.max_packet_size() as usize])
+                .await
+        );
+
         // println!("Send");
         // // Start Conv.
         // unwrap!(
@@ -239,8 +255,8 @@ async fn main(spawner: Spawner) {
 
         // println!("wait");
 
-        Timer::after(Duration::from_secs(1)).await;
-        led_status.toggle();
+        // Timer::after(Duration::from_secs(1)).await;
+        //led_status.toggle();
 
         // let cnt = tmr2.get_counter();
         // let cc = tmr2.get_cc1();

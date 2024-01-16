@@ -2,8 +2,14 @@
 //! AUDIO class implementation.
 //! This file is a copy of the `embassy-usb, class, midi`
 
-use crate::Builder;
+// https://stackoverflow.com/questions/70800715/usb-audio-device-to-host-volume-control
+
+use crate::{
+    audio::uac20::{OutputTerminalTypes, USBTerminalTypes},
+    Builder,
+};
 use embassy_usb::driver::{Driver, Endpoint, EndpointError, EndpointIn, EndpointOut};
+use heapless::Vec;
 
 /// This should be used as `device_class` when building the `UsbDevice`.
 pub const USB_AUDIO_CLASS: u8 = 0x01;
@@ -13,14 +19,14 @@ pub const USB_AUDIO_CLASS: u8 = 0x01;
 #[repr(u8)]
 enum TerminalDescriptorSubType {
     AC_DESCRIPTOR_UNDEFINED = 0x00,
-    HEADER,
-    INPUT_TERMINAL,
-    OUTPUT_TERMINAL,
-    MIXER_UNIT,
-    SELECTOR_UNIT,
-    FEATURE_UNIT,
-    PROCESSING_UNIT,
-    EXTENSION_UNIT,
+    HEADER = 0x01,
+    INPUT_TERMINAL = 0x02,
+    OUTPUT_TERMINAL = 0x03,
+    MIXER_UNIT = 0x04,
+    SELECTOR_UNIT = 0x05,
+    FEATURE_UNIT = 0x06,
+    PROCESSING_UNIT = 0x07,
+    EXTENSION_UNIT = 0x08,
 }
 
 /// `audio10`: Table A-2: Audio Interface Subclass Codes
@@ -46,6 +52,7 @@ enum ACSFT {
 }
 
 const USB_AUDIOCONTROL_SUBCLASS: u8 = 0x01;
+const USB_AUDIOSTREAMING_SUBCLASS: u8 = 0x02;
 const USB_MIDISTREAMING_SUBCLASS: u8 = 0x03;
 const MIDI_IN_JACK_SUBTYPE: u8 = 0x02;
 const MIDI_OUT_JACK_SUBTYPE: u8 = 0x03;
@@ -84,14 +91,19 @@ impl<'d, D: Driver<'d>> AudioClass<'d, D> {
         n_out_jacks: u8,
         max_packet_size: u16,
     ) -> Self {
-        let mut func = builder.function(USB_AUDIO_CLASS, USB_AUDIOCONTROL_SUBCLASS, PROTOCOL_NONE);
+        // Configuration Descriptor
+        let mut cfg_desc =
+            builder.function(USB_AUDIO_CLASS, USB_AUDIOCONTROL_SUBCLASS, PROTOCOL_NONE);
+
+        // A interface
+        let mut iface = cfg_desc.interface();
 
         // Audio control interface
-        let mut iface = func.interface();
         let audio_if = iface.interface_number();
 
-        let midi_if = u8::from(audio_if) + 1;
+        let first_if = u8::from(audio_if) + 1;
 
+        // Class-specific Descriptors (Header)
         let mut alt = iface.alt_setting(
             USB_AUDIO_CLASS,
             USB_AUDIOCONTROL_SUBCLASS,
@@ -99,117 +111,155 @@ impl<'d, D: Driver<'d>> AudioClass<'d, D> {
             None,
         );
 
+        // AudioStreaming interface
+
+        // Input terminal ID = 0x01
         alt.descriptor(
             ACSFT::CS_INTERFACE as u8,
-            &[HEADER_SUBTYPE, 0x00, 0x01, 0x64, 0x02, 0x01, 0x01],
+            &[
+                TerminalDescriptorSubType::HEADER as u8,
+                0x00,
+                0x01,
+                0x48,
+                0x00,
+                0x01,
+                first_if,
+            ],
         );
 
-        // AudioStreaming interface
-        let mut iface = func.interface();
-        let _midi_if = iface.interface_number();
+        // Table 4-3: Input Terminal Descriptor
+        let mut inp_term_desc = Vec::<u8, 10>::new();
+        // bDescriptorSubtype
+        inp_term_desc.push(TerminalDescriptorSubType::INPUT_TERMINAL as u8);
+        // bTerminalID
+        inp_term_desc.push(0x01);
+        // wTerminalType
+        inp_term_desc.extend_from_slice(
+            (USBTerminalTypes::Streaming as u16)
+                .to_le_bytes()
+                .as_slice(),
+        );
+        // bAssocTerminal
+        inp_term_desc.push(0x03);
+        // bNrChannels
+        inp_term_desc.push(0x02);
+        // wChannelConfig
+        inp_term_desc.extend_from_slice((0x0003_u16).to_le_bytes().as_slice());
+        // iChannelNames
+        inp_term_desc.push(0x00);
+        // iTerminal
+        inp_term_desc.push(0x00);
+
+        // Input terminal ID = 0x01
+        alt.descriptor(ACSFT::CS_INTERFACE as u8, &inp_term_desc);
+
+        // Table 4-7: Feature Unit Descriptor
+        let mut feat_term_desc = Vec::<u8, 10>::new();
+        // bDescriptorSubtype
+        feat_term_desc.push(TerminalDescriptorSubType::FEATURE_UNIT as u8);
+        // bUnitID
+        feat_term_desc.push(0x02);
+        // bSourceID
+        feat_term_desc.push(0x02);
+        // bControlSize
+        feat_term_desc.push(0x01);
+
+        // bmaControls(0)
+        feat_term_desc.extend_from_slice((0x0001_u16).to_le_bytes().as_slice());
+
+        // iFeature
+        feat_term_desc.push(0x00);
+
+        // Feature Unit terminal ID = 0x02
+        alt.descriptor(ACSFT::CS_INTERFACE as u8, &feat_term_desc);
+
+        // Table 4-4: Output Terminal Descriptor
+        let mut out_term_desc = Vec::<u8, 10>::new();
+        // bDescriptorSubtype
+        out_term_desc.push(TerminalDescriptorSubType::OUTPUT_TERMINAL as u8);
+        // bTerminalID
+        out_term_desc.push(0x03);
+        // wTerminalType
+        out_term_desc.extend_from_slice(
+            (OutputTerminalTypes::Speaker as u16)
+                .to_le_bytes()
+                .as_slice(),
+        );
+        // bAssocTerminal
+        out_term_desc.push(0x01);
+        // bSourceID
+        out_term_desc.push(0x02);
+        // iTerminal
+        out_term_desc.push(0x00);
+
+        // Output terminal ID = 0x03
+        alt.descriptor(ACSFT::CS_INTERFACE as u8, &out_term_desc);
+
+        // Class-specific Descriptors (Header)
         let mut alt = iface.alt_setting(
             USB_AUDIO_CLASS,
-            AudioInterfaceSubclassCodes::AUDIOSTREAMING as u8,
+            USB_AUDIOSTREAMING_SUBCLASS,
             PROTOCOL_NONE,
             None,
         );
 
-        let midi_streaming_total_length = 7
-            + (n_in_jacks + n_out_jacks) as usize * (1 + 2) as usize
-            + 7
-            + (4 + n_out_jacks as usize)
-            + 7
-            + (4 + n_in_jacks as usize);
-
+        // AS Interface Descriptor
         alt.descriptor(
             ACSFT::CS_INTERFACE as u8,
             &[
-                MS_HEADER_SUBTYPE,
-                0x00,
+                TerminalDescriptorSubType::HEADER as u8,
                 0x01,
-                (midi_streaming_total_length & 0xFF) as u8,
-                ((midi_streaming_total_length >> 8) & 0xFF) as u8,
+                0x01,
+                0x01,
+                0x00,
             ],
         );
 
-        // Calculates the index'th external midi in jack id
-        let in_jack_id_ext = |index| 2 * index + 1;
-        // Calculates the index'th embedded midi out jack id
-        let out_jack_id_emb = |index| 2 * index + 2;
-        // Calculates the index'th external midi out jack id
-        let out_jack_id_ext = |index| 2 * n_in_jacks + 2 * index + 1;
-        // Calculates the index'th embedded midi in jack id
-        let in_jack_id_emb = |index| 2 * n_in_jacks + 2 * index + 2;
-
-        for i in 0..n_in_jacks {
-            alt.descriptor(
-                ACSFT::CS_INTERFACE as u8,
-                &[MIDI_IN_JACK_SUBTYPE, EXTERNAL, in_jack_id_ext(i), 0x00],
-            );
-        }
-
-        for i in 0..n_out_jacks {
-            alt.descriptor(
-                ACSFT::CS_INTERFACE as u8,
-                &[MIDI_IN_JACK_SUBTYPE, EMBEDDED, in_jack_id_emb(i), 0x00],
-            );
-        }
-
-        for i in 0..n_out_jacks {
-            alt.descriptor(
-                ACSFT::CS_INTERFACE as u8,
-                &[
-                    MIDI_OUT_JACK_SUBTYPE,
-                    EXTERNAL,
-                    out_jack_id_ext(i),
-                    0x01,
-                    in_jack_id_emb(i),
-                    0x01,
-                    0x00,
-                ],
-            );
-        }
-
-        for i in 0..n_in_jacks {
-            alt.descriptor(
-                ACSFT::CS_INTERFACE as u8,
-                &[
-                    MIDI_OUT_JACK_SUBTYPE,
-                    EMBEDDED,
-                    out_jack_id_emb(i),
-                    0x01,
-                    in_jack_id_ext(i),
-                    0x01,
-                    0x00,
-                ],
-            );
-        }
-
-        let mut endpoint_data = [
-            MS_GENERAL, 0, // Number of jacks
-            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // Jack mappings
-        ];
-        endpoint_data[1] = n_out_jacks;
-        for i in 0..n_out_jacks {
-            endpoint_data[2 + i as usize] = in_jack_id_emb(i);
-        }
-        let read_ep = alt.endpoint_bulk_out(max_packet_size);
+        // AS Interface Descriptor
         alt.descriptor(
-            ACSFT::CS_ENDPOINT as u8,
-            &endpoint_data[0..2 + n_out_jacks as usize],
+            ACSFT::CS_INTERFACE as u8,
+            &[
+                TerminalDescriptorSubType::INPUT_TERMINAL as u8,
+                0x01,
+                0x02,
+                0x02,
+                0x10,
+                0x01,
+                0x80,
+                0xBB,
+                0x00,
+            ],
         );
 
-        endpoint_data[1] = n_in_jacks;
-        for i in 0..n_in_jacks {
-            endpoint_data[2 + i as usize] = out_jack_id_emb(i);
-        }
-        let write_ep = alt.endpoint_bulk_in(max_packet_size);
+        let samples_ep = alt.endpoint_isochronous_out(max_packet_size, 1);
+
         alt.descriptor(
             ACSFT::CS_ENDPOINT as u8,
-            &endpoint_data[0..2 + n_in_jacks as usize],
+            &[
+                TerminalDescriptorSubType::HEADER as u8,
+                0x00,
+                0x00,
+                0x00,
+                0x00,
+            ],
         );
 
-        AudioClass { read_ep, write_ep }
+        let write_ep = alt.endpoint_interrupt_in(3, 1);
+        alt.descriptor(
+            ACSFT::CS_ENDPOINT as u8,
+            &[
+                TerminalDescriptorSubType::HEADER as u8,
+                0x00,
+                0x00,
+                0x00,
+                0x00,
+            ],
+        );
+
+        AudioClass {
+            read_ep: samples_ep,
+            write_ep,
+        }
     }
 
     /// Gets the maximum packet size in bytes.
