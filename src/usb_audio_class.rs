@@ -4,11 +4,26 @@
 
 // https://stackoverflow.com/questions/70800715/usb-audio-device-to-host-volume-control
 
+use core::{
+    cell::RefCell,
+    future::poll_fn,
+    mem::MaybeUninit,
+    sync::atomic::{AtomicBool, Ordering},
+    task::Poll,
+};
+
 use crate::{
     audio::uac20::{OutputTerminalTypes, USBTerminalTypes},
     Builder,
 };
-use embassy_usb::driver::{Driver, Endpoint, EndpointError, EndpointIn, EndpointOut};
+use defmt::{debug, info};
+use embassy_sync::waitqueue::WakerRegistration;
+use embassy_usb::{
+    control::{self, InResponse, OutResponse, Recipient, Request, RequestType},
+    driver::{Driver, Endpoint, EndpointError, EndpointIn, EndpointOut},
+    types::InterfaceNumber,
+    Handler,
+};
 use heapless::Vec;
 
 /// This should be used as `device_class` when building the `UsbDevice`.
@@ -78,7 +93,7 @@ const PROTOCOL_NONE: u8 = 0x00;
 ///   terminated with a short packet, even if the bulk endpoint is used for stream-like data.
 pub struct AudioClass<'d, D: Driver<'d>> {
     read_ep: D::EndpointOut,
-    write_ep: D::EndpointIn,
+    //write_ep: D::EndpointOut,
 }
 
 impl<'d, D: Driver<'d>> AudioClass<'d, D> {
@@ -87,8 +102,7 @@ impl<'d, D: Driver<'d>> AudioClass<'d, D> {
     /// For full-speed devices, `max_packet_size` has to be one of 8, 16, 32 or 64.
     pub fn new(
         builder: &mut Builder<'d, D>,
-        n_in_jacks: u8,
-        n_out_jacks: u8,
+        state: &'d mut State<'d>,
         max_packet_size: u16,
     ) -> Self {
         // Configuration Descriptor
@@ -96,15 +110,15 @@ impl<'d, D: Driver<'d>> AudioClass<'d, D> {
             builder.function(USB_AUDIO_CLASS, USB_AUDIOCONTROL_SUBCLASS, PROTOCOL_NONE);
 
         // A interface
-        let mut iface = cfg_desc.interface();
+        let mut iface0 = cfg_desc.interface();
 
         // Audio control interface
-        let audio_if = iface.interface_number();
+        let audio_if = iface0.interface_number();
 
         let first_if = u8::from(audio_if) + 1;
 
         // Class-specific Descriptors (Header)
-        let mut alt = iface.alt_setting(
+        let mut if0_alt = iface0.alt_setting(
             USB_AUDIO_CLASS,
             USB_AUDIOCONTROL_SUBCLASS,
             PROTOCOL_NONE,
@@ -113,15 +127,17 @@ impl<'d, D: Driver<'d>> AudioClass<'d, D> {
 
         // AudioStreaming interface
 
+        let midi_streaming_total_length: u16 = 7 + 12 + 9 + 7 + (2 + 1);
+
         // Input terminal ID = 0x01
-        alt.descriptor(
+        if0_alt.descriptor(
             ACSFT::CS_INTERFACE as u8,
             &[
                 TerminalDescriptorSubType::HEADER as u8,
                 0x00,
                 0x01,
-                0x48,
-                0x00,
+                (midi_streaming_total_length & 0xFF) as u8,
+                ((midi_streaming_total_length >> 8) & 0xFF) as u8,
                 0x01,
                 first_if,
             ],
@@ -151,10 +167,10 @@ impl<'d, D: Driver<'d>> AudioClass<'d, D> {
         inp_term_desc.push(0x00);
 
         // Input terminal ID = 0x01
-        alt.descriptor(ACSFT::CS_INTERFACE as u8, &inp_term_desc);
+        if0_alt.descriptor(ACSFT::CS_INTERFACE as u8, &inp_term_desc);
 
         // Table 4-7: Feature Unit Descriptor
-        let mut feat_term_desc = Vec::<u8, 10>::new();
+        let mut feat_term_desc = Vec::<u8, 16>::new();
         // bDescriptorSubtype
         feat_term_desc.push(TerminalDescriptorSubType::FEATURE_UNIT as u8);
         // bUnitID
@@ -162,16 +178,18 @@ impl<'d, D: Driver<'d>> AudioClass<'d, D> {
         // bSourceID
         feat_term_desc.push(0x02);
         // bControlSize
-        feat_term_desc.push(0x01);
+        feat_term_desc.push(0x03);
 
         // bmaControls(0)
-        feat_term_desc.extend_from_slice((0x0001_u16).to_le_bytes().as_slice());
+        feat_term_desc.extend_from_slice((0x0003_u16).to_le_bytes().as_slice());
+        feat_term_desc.extend_from_slice((0x0000_u16).to_le_bytes().as_slice());
+        feat_term_desc.extend_from_slice((0x0000_u16).to_le_bytes().as_slice());
 
         // iFeature
         feat_term_desc.push(0x00);
 
         // Feature Unit terminal ID = 0x02
-        alt.descriptor(ACSFT::CS_INTERFACE as u8, &feat_term_desc);
+        if0_alt.descriptor(ACSFT::CS_INTERFACE as u8, &feat_term_desc);
 
         // Table 4-4: Output Terminal Descriptor
         let mut out_term_desc = Vec::<u8, 10>::new();
@@ -193,10 +211,24 @@ impl<'d, D: Driver<'d>> AudioClass<'d, D> {
         out_term_desc.push(0x00);
 
         // Output terminal ID = 0x03
-        alt.descriptor(ACSFT::CS_INTERFACE as u8, &out_term_desc);
+        if0_alt.descriptor(ACSFT::CS_INTERFACE as u8, &out_term_desc);
+
+        // A interface
+        let mut iface1 = cfg_desc.interface();
+
+        // Audio control interface
+        let audio_if = iface1.interface_number();
 
         // Class-specific Descriptors (Header)
-        let mut alt = iface.alt_setting(
+        let mut if1_alt = iface1.alt_setting(
+            USB_AUDIO_CLASS,
+            USB_AUDIOSTREAMING_SUBCLASS,
+            PROTOCOL_NONE,
+            None,
+        );
+
+        // Class-specific Descriptors (Header)
+        let mut alt = iface1.alt_setting(
             USB_AUDIO_CLASS,
             USB_AUDIOSTREAMING_SUBCLASS,
             PROTOCOL_NONE,
@@ -244,21 +276,29 @@ impl<'d, D: Driver<'d>> AudioClass<'d, D> {
             ],
         );
 
-        let write_ep = alt.endpoint_interrupt_in(3, 1);
-        alt.descriptor(
-            ACSFT::CS_ENDPOINT as u8,
-            &[
-                TerminalDescriptorSubType::HEADER as u8,
-                0x00,
-                0x00,
-                0x00,
-                0x00,
-            ],
-        );
+        // let sync_ep = alt.endpoint_interrupt_out(3, 1);
+        // alt.descriptor(
+        //     ACSFT::CS_ENDPOINT as u8,
+        //     &[
+        //         TerminalDescriptorSubType::HEADER as u8,
+        //         0x00,
+        //         0x00,
+        //         0x00,
+        //         0x00,
+        //     ],
+        // );
+
+        drop(cfg_desc);
+
+        let control = state.control.write(Control {
+            comm_if: audio_if,
+            shared: &state.shared,
+        });
+        builder.handler(control);
 
         AudioClass {
             read_ep: samples_ep,
-            write_ep,
+            //write_ep: sync_ep,
         }
     }
 
@@ -270,7 +310,8 @@ impl<'d, D: Driver<'d>> AudioClass<'d, D> {
 
     /// Writes a single packet into the IN endpoint.
     pub async fn write_packet(&mut self, data: &[u8]) -> Result<(), EndpointError> {
-        self.write_ep.write(data).await
+        Err(EndpointError::Disabled)
+        // self.write_ep.write(data).await
     }
 
     /// Reads a single packet from the OUT endpoint.
@@ -283,19 +324,19 @@ impl<'d, D: Driver<'d>> AudioClass<'d, D> {
         self.read_ep.wait_enabled().await;
     }
 
-    /// Split the class into a sender and receiver.
-    ///
-    /// This allows concurrently sending and receiving packets from separate tasks.
-    pub fn split(self) -> (Sender<'d, D>, Receiver<'d, D>) {
-        (
-            Sender {
-                write_ep: self.write_ep,
-            },
-            Receiver {
-                read_ep: self.read_ep,
-            },
-        )
-    }
+    // /// Split the class into a sender and receiver.
+    // ///
+    // /// This allows concurrently sending and receiving packets from separate tasks.
+    // pub fn split(self) -> (Sender<'d, D>, Receiver<'d, D>) {
+    //     (
+    //         Sender {
+    //             write_ep: self.write_ep,
+    //         },
+    //         Receiver {
+    //             read_ep: self.read_ep,
+    //         },
+    //     )
+    // }
 }
 
 /// Midi class packet sender.
@@ -345,5 +386,102 @@ impl<'d, D: Driver<'d>> Receiver<'d, D> {
     /// Waits for the USB host to enable this interface
     pub async fn wait_connection(&mut self) {
         self.read_ep.wait_enabled().await;
+    }
+}
+
+/// Internal state for CDC-ACM
+pub struct State<'a> {
+    control: MaybeUninit<Control<'a>>,
+    shared: ControlShared,
+}
+
+impl<'a> Default for State<'a> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<'a> State<'a> {
+    /// Create a new `State`.
+    pub fn new() -> Self {
+        Self {
+            control: MaybeUninit::uninit(),
+            shared: ControlShared::default(),
+        }
+    }
+}
+
+struct Control<'a> {
+    comm_if: InterfaceNumber,
+    shared: &'a ControlShared,
+}
+
+struct ControlShared {
+    waker: RefCell<WakerRegistration>,
+    changed: AtomicBool,
+}
+
+impl Default for ControlShared {
+    fn default() -> Self {
+        ControlShared {
+            waker: RefCell::new(WakerRegistration::new()),
+            changed: AtomicBool::new(false),
+        }
+    }
+}
+
+impl ControlShared {
+    async fn changed(&self) {
+        poll_fn(|cx| {
+            if self.changed.load(Ordering::Relaxed) {
+                self.changed.store(false, Ordering::Relaxed);
+                Poll::Ready(())
+            } else {
+                self.waker.borrow_mut().register(cx.waker());
+                Poll::Pending
+            }
+        })
+        .await;
+    }
+}
+
+impl<'a> Control<'a> {
+    fn shared(&mut self) -> &'a ControlShared {
+        self.shared
+    }
+}
+
+impl<'d> Handler for Control<'d> {
+    fn reset(&mut self) {
+        info!("AUC: Reset");
+        let shared = self.shared();
+
+        shared.changed.store(true, Ordering::Relaxed);
+        shared.waker.borrow_mut().wake();
+    }
+
+    fn control_out(&mut self, req: control::Request, data: &[u8]) -> Option<OutResponse> {
+        // if (req.request_type, req.recipient, req.index)
+        //     != (
+        //         RequestType::Class,
+        //         Recipient::Interface,
+        //         self.comm_if.0 as u16,
+        //     )
+        // {
+        //     return None;
+        // }
+
+        info!(
+            "CO: R: {}, idx: {:02x} buf: {:02x}",
+            req.request, req.index, data
+        );
+
+        None
+    }
+
+    fn control_in<'a>(&'a mut self, req: Request, buf: &'a mut [u8]) -> Option<InResponse<'a>> {
+        info!("CI: R: {}, idx: {:02x}", req.request, req.index);
+
+        None
     }
 }

@@ -20,7 +20,6 @@ use embassy_time::{Duration, Timer};
 use heapless::{String, Vec};
 use {defmt_rtt as _, panic_probe as _};
 
-use embassy_usb::class::cdc_acm::{CdcAcmClass, State};
 use embassy_usb::driver::EndpointError;
 use embassy_usb::Builder;
 
@@ -32,6 +31,7 @@ bind_interrupts!(struct Irqs {
 
 use embassy_stm32::i2s::{Config as I2SConfig, Format, I2S};
 use static_cell::StaticCell;
+use usb_audio_class::State;
 
 mod audio;
 mod usb_audio_class;
@@ -61,6 +61,7 @@ static CONFIG_DESC: StaticCell<[u8; 256]> = StaticCell::new();
 static BOS_DESC: StaticCell<[u8; 256]> = StaticCell::new();
 // static MSOS_DESC: StaticCell<[u8; 128]> = StaticCell::new();
 static CONTROL_BUF: StaticCell<[u8; 256]> = StaticCell::new();
+static AUDIO_STATE: StaticCell<State> = StaticCell::new();
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
@@ -211,7 +212,8 @@ async fn main(spawner: Spawner) {
         CONTROL_BUF.init([0; 256]),
     );
 
-    let mut class = usb_audio_class::AudioClass::new(&mut builder, 1, 1, 64);
+    let mut class =
+        usb_audio_class::AudioClass::new(&mut builder, AUDIO_STATE.init(State::default()), 64);
 
     // Build the builder.
     let usb = builder.build();
@@ -237,13 +239,13 @@ async fn main(spawner: Spawner) {
     loop {
         class.wait_connection().await;
         led_status.toggle();
-        unwrap!(class.write_packet(&[0x00, 0x00, 0x00]).await);
+        //unwrap!(class.write_packet(&[0x00, 0x00, 0x00]).await);
 
-        unwrap!(
-            class
-                .read_packet(&mut packet_buf[0..class.max_packet_size() as usize])
-                .await
-        );
+        // unwrap!(
+        //     class
+        //         .read_packet(&mut packet_buf[0..class.max_packet_size() as usize])
+        //         .await
+        // );
 
         // println!("Send");
         // // Start Conv.
