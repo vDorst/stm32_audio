@@ -513,19 +513,19 @@ impl<'d> Handler for Control<'d> {
         // Get Min
         if what == 0x02 && req.request == 0x82 {
             info!("Get Min: vol");
-            return Some(InResponse::Accepted(&[0x00, 0x80]));
+            return Some(InResponse::Accepted(&[0x00, 0x00]));
         }
 
         // Get Max
         if what == 0x02 && req.request == 0x83 {
             info!("Get Max: vol");
-            return Some(InResponse::Accepted(&[0x00, 0x00]));
+            return Some(InResponse::Accepted(&[100, 0]));
         }
 
         // Get Res
         if what == 0x02 && req.request == 0x84 {
             info!("Get Res: vol");
-            return Some(InResponse::Accepted(&[0x10, 0x00]));
+            return Some(InResponse::Accepted(&[0x01, 0x00]));
         }
 
         None
