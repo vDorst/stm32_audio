@@ -5,8 +5,9 @@
 
 use core::borrow::BorrowMut;
 use core::fmt::Write;
+use core::ptr::slice_from_raw_parts;
 use cortex_m::peripheral::NVIC;
-use defmt::{info, println, unwrap};
+use defmt::{error, info, println, unwrap};
 use embassy_executor::Spawner;
 use embassy_stm32::gpio::Output;
 use embassy_stm32::i2c::{Config as I2CConfig, I2c};
@@ -16,7 +17,8 @@ use embassy_stm32::time::Hertz;
 use embassy_stm32::timer::low_level::CaptureCompare16bitInstance;
 use embassy_stm32::usb_otg::Driver;
 use embassy_stm32::{bind_interrupts, i2c, pac, peripherals, usb_otg, Config, Peripheral};
-use embassy_time::{Duration, Timer};
+use embassy_time::{Delay, Duration, Timer};
+use embedded_hal::delay::DelayNs;
 use heapless::{String, Vec};
 use {defmt_rtt as _, panic_probe as _};
 
@@ -169,10 +171,10 @@ async fn main(spawner: Spawner) {
 
     let mut write: Vec<u16, 96> = Vec::new();
 
-    // for sample in SAMPLES_1K_HZ {
-    //     write.push(sample);
-    //     write.push(sample);
-    // }
+    for sample in SAMPLES_1K_HZ {
+        write.push(sample);
+        write.push(sample);
+    }
 
     // Create the driver, from the HAL.
 
@@ -212,20 +214,24 @@ async fn main(spawner: Spawner) {
         CONTROL_BUF.init([0; 256]),
     );
 
-    let mut class =
-        usb_audio_class::AudioClass::new(&mut builder, AUDIO_STATE.init(State::default()), 64);
+    let mut packet_buf = [0; 64];
+
+    let mut class = usb_audio_class::AudioClass::new(
+        &mut builder,
+        AUDIO_STATE.init(State::default()),
+        packet_buf.len() as u16,
+    );
+
+    info!("write I2S");
+    for _ in 0u32..1000 {
+        unwrap!(i2s.writer(&write));
+    }
 
     // Build the builder.
     let usb = builder.build();
 
     // Run the USB device.
     unwrap!(spawner.spawn(usb_runner(usb)));
-
-    // info!("write I2S");
-    // for _ in 0u32..5000 {
-    //     unwrap!(i2s.writer(&write));
-    // }
-
     info!("write done");
 
     // let mut buf = [0, ];
@@ -234,17 +240,25 @@ async fn main(spawner: Spawner) {
 
     let mut old: u32 = tmr2.get_cc1();
 
-    let mut packet_buf: [u8; 200] = [0; 200];
-
     loop {
-        class.wait_connection().await;
+        // class.wait_connection().await;
+        // info!("EP Connected");
         led_status.toggle();
 
-        if let Ok(n) = class
-            .read_packet(&mut packet_buf[0..class.max_packet_size() as usize])
-            .await
-        {
-            println!("Got: {}", n);
+        match class.read_packet(&mut packet_buf).await {
+            Ok(n) => {
+                let buf_orig = &packet_buf[0..n & 0xFFFE];
+                let buf = slice_from_raw_parts(buf_orig.as_ptr().cast::<u16>(), buf_orig.len() / 2);
+                let buf = unsafe { &*buf };
+                if buf.iter().any(|s| *s != 0x000) {
+                    println!("Got: {} - {} {:0004x} {:02x}", n, buf.len(), buf, buf_orig);
+                }
+                unwrap!(i2s.writer(buf));
+            }
+            Err(e) => {
+                // error!("Read: {:?}", e);
+                Timer::after_millis(100).await;
+            }
         }
 
         // println!("Send");

@@ -1,21 +1,27 @@
 #![allow(unused)]
+#![allow(clippy::single_match_else)]
 //! AUDIO class implementation.
 //! This file is a copy of the `embassy-usb, class, midi`
 
 // https://stackoverflow.com/questions/70800715/usb-audio-device-to-host-volume-control
 
 use core::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     future::poll_fn,
     mem::MaybeUninit,
+    num::NonZeroU32,
     sync::atomic::{AtomicBool, Ordering},
     task::Poll,
 };
 
 use crate::{
-    audio::uac20::{OutputTerminalTypes, USBTerminalTypes},
+    audio::{
+        common::{ACSRC, EPCS, FUCS},
+        uac20::{OutputTerminalTypes, USBTerminalTypes},
+    },
     Builder,
 };
+
 use defmt::{debug, info};
 use embassy_sync::waitqueue::WakerRegistration;
 use embassy_usb::{
@@ -181,7 +187,7 @@ impl<'d, D: Driver<'d>> AudioClass<'d, D> {
         feat_term_desc.push(0x02);
 
         // bmaControls(0)
-        feat_term_desc.extend_from_slice((0x0003_u16).to_le_bytes().as_slice());
+        feat_term_desc.extend_from_slice((0x0001_u16).to_le_bytes().as_slice());
         feat_term_desc.extend_from_slice((0x0000_u16).to_le_bytes().as_slice());
         // feat_term_desc.extend_from_slice((0x0000_u16).to_le_bytes().as_slice());
 
@@ -255,11 +261,14 @@ impl<'d, D: Driver<'d>> AudioClass<'d, D> {
                 0x01,
                 0x02,
                 0x02,
-                0x10,
+                16,
                 0x01,
                 0x80,
                 0xBB,
                 0x00,
+                // 0x00,
+                // 0x77,
+                // 0x01,
             ],
         );
 
@@ -269,7 +278,7 @@ impl<'d, D: Driver<'d>> AudioClass<'d, D> {
             ACSFT::CS_ENDPOINT as u8,
             &[
                 TerminalDescriptorSubType::HEADER as u8,
-                0x00,
+                0x81, // Sampling Freq. MaxPackets ONly
                 0x00,
                 0x00,
                 0x00,
@@ -419,6 +428,9 @@ struct Control<'a> {
 struct ControlShared {
     waker: RefCell<WakerRegistration>,
     changed: AtomicBool,
+    sr: Cell<Option<NonZeroU32>>,
+    vol: Cell<u16>,
+    mute: Cell<bool>,
 }
 
 impl Default for ControlShared {
@@ -426,6 +438,9 @@ impl Default for ControlShared {
         ControlShared {
             waker: RefCell::new(WakerRegistration::new()),
             changed: AtomicBool::new(false),
+            vol: Cell::new(100),
+            mute: Cell::new(false),
+            sr: Cell::new(None),
         }
     }
 }
@@ -461,6 +476,8 @@ impl<'d> Handler for Control<'d> {
     }
 
     fn control_out(&mut self, req: control::Request, data: &[u8]) -> Option<OutResponse> {
+        let shared = self.shared();
+
         // if (req.request_type, req.recipient, req.index)
         //     != (
         //         RequestType::Class,
@@ -471,22 +488,72 @@ impl<'d> Handler for Control<'d> {
         //     return None;
         // }
         let what = (req.value >> 8) as u8;
-        info!(
-            "CO: type: {}, requst 0x{:02x} recip: {} idx: {} value {} what: 0x{:02x} data: {:02x}",
-            req.request_type, req.request, req.recipient, req.index, req.value, what, data
-        );
 
-        if what == 0x01 {
-            info!("Set: Mute: {}", data[0]);
-            return Some(OutResponse::Accepted);
-        }
+        let Some(acsrc) = ACSRC::try_from(req.request) else {
+            return Some(OutResponse::Rejected);
+        };
 
-        if what == 0x02 {
-            info!(
-                "Set: Volume: {}",
-                u16::from_le_bytes(data[0..2].try_into().unwrap())
-            );
-            return Some(OutResponse::Accepted);
+        match req.recipient {
+            Recipient::Interface => {
+                let Some(fucs) = FUCS::try_from(what) else {
+                    return Some(OutResponse::Rejected);
+                };
+
+                match fucs {
+                    FUCS::MUTE => {
+                        return Some(if matches!(acsrc, ACSRC::CUR) {
+                            let mute = data[0] != 0x00;
+                            shared.mute.set(mute);
+                            info!("Set: Mute: {}", mute);
+
+                            OutResponse::Accepted
+                        } else {
+                            info!("{} {} not supported", fucs, acsrc);
+                            OutResponse::Rejected
+                        })
+                    }
+
+                    FUCS::VOLUME => {
+                        return Some(if matches!(acsrc, ACSRC::CUR) {
+                            let vol = u16::from_le_bytes(data[0..2].try_into().unwrap());
+                            info!("Set: Volume: {}", vol);
+                            shared.vol.set(vol);
+                            OutResponse::Accepted
+                        } else {
+                            info!("{} {} not supported", fucs, acsrc);
+                            OutResponse::Rejected
+                        })
+                    }
+
+                    _ => {
+                        info!("{} {} not supported", fucs, acsrc);
+                        return Some(OutResponse::Rejected);
+                    }
+                }
+            }
+            Recipient::Endpoint => {
+                let Some(epcs) = EPCS::try_from(what) else {
+                    return Some(OutResponse::Rejected);
+                };
+
+                if matches!(epcs, EPCS::SAMPLING_FREQ) && matches!(acsrc, ACSRC::CUR) {
+                    let sr =
+                        u32::from(data[2]) << 16 | u32::from(data[1]) << 8 | u32::from(data[0]);
+                    // [80, bb, 00]
+                    if let Some(val) = NonZeroU32::new(sr) {
+                        info!("Set Samplerate to {} Hz", val);
+                        shared.sr.set(Some(val));
+                        return Some(OutResponse::Accepted);
+                    }
+                    return Some(OutResponse::Rejected);
+                }
+            }
+            _ => {
+                info!(
+               "CO: type: {}, requst 0x{:02x} recip: {} idx: 0x{:04x} value 0x{:04x} what: 0x{:02x} data: {:02x}",
+                req.request_type, req.request, req.recipient, req.index, req.value, what, data
+                );
+            }
         }
 
         None
@@ -494,38 +561,83 @@ impl<'d> Handler for Control<'d> {
 
     fn control_in<'a>(&'a mut self, req: Request, buf: &'a mut [u8]) -> Option<InResponse<'a>> {
         let what = (req.value >> 8) as u8;
-        info!(
-            "CI: type: {} requst 0x{:02x}, recip: {}, value: {} idx: {} what: 0x{:02x}",
+
+        let Some(acsrc) = ACSRC::try_from(req.request) else {
+            return Some(InResponse::Rejected);
+        };
+
+        let shared = self.shared();
+
+        match req.recipient {
+            Recipient::Interface => {
+                let Some(fucs) = FUCS::try_from(what) else {
+                    return Some(InResponse::Rejected);
+                };
+
+                match fucs {
+                    FUCS::MUTE => {
+                        return Some(if matches!(acsrc, ACSRC::CUR) {
+                            buf[0] = u8::from(shared.mute.get());
+                            InResponse::Accepted(&buf[0..1])
+                        } else {
+                            info!("{} {} not supported", fucs, acsrc);
+                            InResponse::Rejected
+                        });
+                    }
+
+                    FUCS::VOLUME => match acsrc {
+                        ACSRC::CUR => {
+                            let vol = shared.vol.get();
+                            buf[0..2].copy_from_slice(vol.to_le_bytes().as_slice());
+
+                            return Some(InResponse::Accepted(&buf[0..2]));
+                        }
+                        ACSRC::MIN => return Some(InResponse::Accepted(&[0x00, 0x00])),
+                        ACSRC::MAX => return Some(InResponse::Accepted(&[100, 0])),
+                        ACSRC::RES => return Some(InResponse::Accepted(&[0x01, 0x00])),
+                        _ => {
+                            info!("{} {} not supported", fucs, acsrc);
+                            return Some(InResponse::Rejected);
+                        }
+                    },
+                    _ => {
+                        info!("{} {} not supported", fucs, acsrc);
+                        return Some(InResponse::Rejected);
+                    }
+                }
+            }
+
+            Recipient::Endpoint => {
+                let Some(epcs) = EPCS::try_from(what) else {
+                    return Some(InResponse::Rejected);
+                };
+                match epcs {
+                    EPCS::SAMPLING_FREQ => match acsrc {
+                        ACSRC::CUR => match shared.sr.get() {
+                            Some(sr) => {
+                                let sr = u32::from(sr);
+                                buf[0..3].copy_from_slice(&sr.to_le_bytes()[0..3]);
+                                return Some(InResponse::Accepted(&buf[0..3]));
+                            }
+                            None => return Some(InResponse::Rejected),
+                        },
+                        _ => {
+                            info!("{} {} not supported", epcs, acsrc);
+                            return Some(InResponse::Rejected);
+                        }
+                    },
+                    _ => {
+                        info!("{} {} not supported", epcs, acsrc);
+                        return Some(InResponse::Rejected);
+                    }
+                }
+            }
+            _ => {
+                info!(
+            "CI: type: {} requst 0x{:02x}, recip: {}, value: 0x{:04x} idx: 0x{:04x} what: 0x{:02x}",
             req.request_type, req.request, req.recipient, req.value, req.index, what
         );
-
-        // Get Cur
-        if what == 0x01 && req.request == 0x81 {
-            info!("Get Cur: Mute");
-            return Some(InResponse::Accepted(&[0x01]));
-        }
-
-        if what == 0x02 && req.request == 0x81 {
-            info!("Get Cur: Vol");
-            return Some(InResponse::Accepted(&[0x00, 0x00]));
-        }
-
-        // Get Min
-        if what == 0x02 && req.request == 0x82 {
-            info!("Get Min: vol");
-            return Some(InResponse::Accepted(&[0x00, 0x00]));
-        }
-
-        // Get Max
-        if what == 0x02 && req.request == 0x83 {
-            info!("Get Max: vol");
-            return Some(InResponse::Accepted(&[100, 0]));
-        }
-
-        // Get Res
-        if what == 0x02 && req.request == 0x84 {
-            info!("Get Res: vol");
-            return Some(InResponse::Accepted(&[0x01, 0x00]));
+            }
         }
 
         None
@@ -540,6 +652,6 @@ impl<'d> Handler for Control<'d> {
     }
 
     fn set_alternate_setting(&mut self, iface: InterfaceNumber, alternate_setting: u8) {
-        info!("ALT: i {} as: {}", iface, alternate_setting);
+        info!("ALT: inf# {} a_setting: {}", iface.0, alternate_setting);
     }
 }
