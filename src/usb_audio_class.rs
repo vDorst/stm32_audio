@@ -127,7 +127,7 @@ impl<'d, D: Driver<'d>> AudioClass<'d, D> {
 
         // AudioStreaming interface
 
-        let midi_streaming_total_length: u16 = 7 + 12 + 9 + 7 + (2 + 1);
+        let midi_streaming_total_length: u16 = 9 + 12 + 13 + 9;
 
         // Input terminal ID = 0x01
         if0_alt.descriptor(
@@ -176,14 +176,14 @@ impl<'d, D: Driver<'d>> AudioClass<'d, D> {
         // bUnitID
         feat_term_desc.push(0x02);
         // bSourceID
-        feat_term_desc.push(0x02);
+        feat_term_desc.push(0x01);
         // bControlSize
-        feat_term_desc.push(0x03);
+        feat_term_desc.push(0x02);
 
         // bmaControls(0)
         feat_term_desc.extend_from_slice((0x0003_u16).to_le_bytes().as_slice());
         feat_term_desc.extend_from_slice((0x0000_u16).to_le_bytes().as_slice());
-        feat_term_desc.extend_from_slice((0x0000_u16).to_le_bytes().as_slice());
+        // feat_term_desc.extend_from_slice((0x0000_u16).to_le_bytes().as_slice());
 
         // iFeature
         feat_term_desc.push(0x00);
@@ -199,7 +199,7 @@ impl<'d, D: Driver<'d>> AudioClass<'d, D> {
         out_term_desc.push(0x03);
         // wTerminalType
         out_term_desc.extend_from_slice(
-            (OutputTerminalTypes::Speaker as u16)
+            (OutputTerminalTypes::Headphones as u16)
                 .to_le_bytes()
                 .as_slice(),
         );
@@ -470,18 +470,76 @@ impl<'d> Handler for Control<'d> {
         // {
         //     return None;
         // }
-
+        let what = (req.value >> 8) as u8;
         info!(
-            "CO: R: {}, idx: {:02x} buf: {:02x}",
-            req.request, req.index, data
+            "CO: type: {}, requst 0x{:02x} recip: {} idx: {} value {} what: 0x{:02x} data: {:02x}",
+            req.request_type, req.request, req.recipient, req.index, req.value, what, data
         );
+
+        if what == 0x01 {
+            info!("Set: Mute: {}", data[0]);
+            return Some(OutResponse::Accepted);
+        }
+
+        if what == 0x02 {
+            info!(
+                "Set: Volume: {}",
+                u16::from_le_bytes(data[0..2].try_into().unwrap())
+            );
+            return Some(OutResponse::Accepted);
+        }
 
         None
     }
 
     fn control_in<'a>(&'a mut self, req: Request, buf: &'a mut [u8]) -> Option<InResponse<'a>> {
-        info!("CI: R: {}, idx: {:02x}", req.request, req.index);
+        let what = (req.value >> 8) as u8;
+        info!(
+            "CI: type: {} requst 0x{:02x}, recip: {}, value: {} idx: {} what: 0x{:02x}",
+            req.request_type, req.request, req.recipient, req.value, req.index, what
+        );
+
+        // Get Cur
+        if what == 0x01 && req.request == 0x81 {
+            info!("Get Cur: Mute");
+            return Some(InResponse::Accepted(&[0x01]));
+        }
+
+        if what == 0x02 && req.request == 0x81 {
+            info!("Get Cur: Vol");
+            return Some(InResponse::Accepted(&[0x00, 0x00]));
+        }
+
+        // Get Min
+        if what == 0x02 && req.request == 0x82 {
+            info!("Get Min: vol");
+            return Some(InResponse::Accepted(&[0x00, 0x80]));
+        }
+
+        // Get Max
+        if what == 0x02 && req.request == 0x83 {
+            info!("Get Max: vol");
+            return Some(InResponse::Accepted(&[0x00, 0x00]));
+        }
+
+        // Get Res
+        if what == 0x02 && req.request == 0x84 {
+            info!("Get Res: vol");
+            return Some(InResponse::Accepted(&[0x10, 0x00]));
+        }
 
         None
+    }
+
+    fn enabled(&mut self, enabled: bool) {
+        info!("EN: {}", enabled);
+    }
+
+    fn configured(&mut self, configured: bool) {
+        info!("CFG: {}", configured);
+    }
+
+    fn set_alternate_setting(&mut self, iface: InterfaceNumber, alternate_setting: u8) {
+        info!("ALT: i {} as: {}", iface, alternate_setting);
     }
 }

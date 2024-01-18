@@ -239,13 +239,13 @@ async fn main(spawner: Spawner) {
     loop {
         class.wait_connection().await;
         led_status.toggle();
-        //unwrap!(class.write_packet(&[0x00, 0x00, 0x00]).await);
 
-        // unwrap!(
-        //     class
-        //         .read_packet(&mut packet_buf[0..class.max_packet_size() as usize])
-        //         .await
-        // );
+        if let Ok(n) = class
+            .read_packet(&mut packet_buf[0..class.max_packet_size() as usize])
+            .await
+        {
+            println!("Got: {}", n);
+        }
 
         // println!("Send");
         // // Start Conv.
