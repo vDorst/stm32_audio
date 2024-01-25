@@ -187,7 +187,7 @@ impl<'d, D: Driver<'d>> AudioClass<'d, D> {
         feat_term_desc.push(0x02);
 
         // bmaControls(0)
-        feat_term_desc.extend_from_slice((0x0001_u16).to_le_bytes().as_slice());
+        feat_term_desc.extend_from_slice((0x0003_u16).to_le_bytes().as_slice());
         feat_term_desc.extend_from_slice((0x0000_u16).to_le_bytes().as_slice());
         // feat_term_desc.extend_from_slice((0x0000_u16).to_le_bytes().as_slice());
 
@@ -257,14 +257,8 @@ impl<'d, D: Driver<'d>> AudioClass<'d, D> {
         alt.descriptor(
             ACSFT::CS_INTERFACE as u8,
             &[
-                TerminalDescriptorSubType::INPUT_TERMINAL as u8,
-                0x01,
-                0x02,
-                0x02,
-                16,
-                0x01,
-                0x80,
-                0xBB,
+                0x02, // Format_Type
+                0x01, 0x02, 0x02, 16, 0x01, 0x80, 0xBB,
                 0x00,
                 // 0x00,
                 // 0x77,

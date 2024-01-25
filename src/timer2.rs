@@ -81,11 +81,13 @@ impl CCTIM2 {
         CCTIM2(timer2)
     }
 
+    #[allow(dead_code, clippy::unused_self)]
     pub fn get_counter(&self) -> u32 {
         let tmr2 = TIM2::regs_gp32();
         tmr2.cnt().read().cnt()
     }
 
+    #[allow(dead_code, clippy::unused_self)]
     pub fn get_cc1(&self) -> u32 {
         let tmr2 = TIM2::regs_gp32();
         tmr2.ccr(0).read().ccr()
