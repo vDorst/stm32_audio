@@ -70,6 +70,15 @@ async fn i2s_runner(
     }
 }
 
+#[repr(align(8))]
+struct SampleBuffer(pub [u8; 200]);
+
+impl SampleBuffer {
+    pub fn new() -> Self {
+        Self([0; 200])
+    }
+}
+
 #[embassy_executor::task]
 async fn usb_runner(mut usb: embassy_usb::UsbDevice<'static, Driver<'static, USB_OTG_FS>>) {
     loop {
@@ -94,18 +103,15 @@ async fn usb_samples_task(
     mut uac: AudioClass<'static, Driver<'static, USB_OTG_FS>>,
     samples: Sender<'static, NoopRawMutex, TSamples, 10>,
 ) {
-    let mut packet_buf = [0_u8; 200];
+    let mut packet_buf = SampleBuffer::new();
     loop {
-        match uac.read_packet(&mut packet_buf).await {
+        match uac.read_packet(&mut packet_buf.0).await {
             Ok(n) => {
-                let buf_orig = &packet_buf[0..n & 0xFFFE];
+                let buf_orig = &packet_buf.0[0..n & 0xFFFE];
                 let buf = slice_from_raw_parts(buf_orig.as_ptr().cast::<u16>(), buf_orig.len() / 2);
                 let buf = unsafe { &*buf };
-                // if buf.iter().any(|s| *s != 0x000) {
-                //     println!("Got: {} - {} {:0004x} {:02x}", n, buf.len(), buf, buf_orig);
-                // }
                 let mut sb: TSamples = Vec::new();
-                sb.extend_from_slice(buf);
+                unwrap!(sb.extend_from_slice(buf));
                 // info!("Got: {} len {}", n, sb.len());
                 samples.send(sb).await;
             }
