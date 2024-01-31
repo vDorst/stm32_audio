@@ -272,7 +272,7 @@ impl<'d, D: Driver<'d>> AudioClass<'d, D> {
             ACSFT::CS_ENDPOINT as u8,
             &[
                 TerminalDescriptorSubType::HEADER as u8,
-                0x81, // Sampling Freq. MaxPackets ONly
+                0x01, // Sampling Freq. MaxPackets ONly
                 0x00,
                 0x00,
                 0x00,

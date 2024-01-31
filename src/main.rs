@@ -3,7 +3,7 @@
 #![deny(clippy::pedantic)]
 #![allow(unused_imports)]
 
-use crate::i2s_process::{I2cPlayer, T_Samples};
+use crate::i2s_process::{I2cPlayer, TSamples};
 use core::borrow::BorrowMut;
 use core::fmt::Write;
 use core::ptr::slice_from_raw_parts;
@@ -80,21 +80,21 @@ async fn usb_runner(mut usb: embassy_usb::UsbDevice<'static, Driver<'static, USB
 
 // Create embassy-usb DeviceBuilder using the driver and config.
 // It needs some buffers for building the descriptors.
-static EP_OUT_BUFFER: StaticCell<[u8; 256]> = StaticCell::new();
+static EP_OUT_BUFFER: StaticCell<[u8; 512]> = StaticCell::new();
 static DEVICE_DESC: StaticCell<[u8; 256]> = StaticCell::new();
 static CONFIG_DESC: StaticCell<[u8; 256]> = StaticCell::new();
 static BOS_DESC: StaticCell<[u8; 256]> = StaticCell::new();
 // static MSOS_DESC: StaticCell<[u8; 128]> = StaticCell::new();
 static CONTROL_BUF: StaticCell<[u8; 256]> = StaticCell::new();
 static AUDIO_STATE: StaticCell<State> = StaticCell::new();
-static SANPLE_BUF: StaticCell<Channel<NoopRawMutex, T_Samples, 10>> = StaticCell::new();
+static SANPLE_BUF: StaticCell<Channel<NoopRawMutex, TSamples, 10>> = StaticCell::new();
 
 #[embassy_executor::task]
 async fn usb_samples_task(
     mut uac: AudioClass<'static, Driver<'static, USB_OTG_FS>>,
-    samples: Sender<'static, NoopRawMutex, T_Samples, 10>,
+    samples: Sender<'static, NoopRawMutex, TSamples, 10>,
 ) {
-    let mut packet_buf = [0_u8; 64];
+    let mut packet_buf = [0_u8; 200];
     loop {
         match uac.read_packet(&mut packet_buf).await {
             Ok(n) => {
@@ -104,13 +104,14 @@ async fn usb_samples_task(
                 // if buf.iter().any(|s| *s != 0x000) {
                 //     println!("Got: {} - {} {:0004x} {:02x}", n, buf.len(), buf, buf_orig);
                 // }
-                let mut sb: T_Samples = Vec::new();
+                let mut sb: TSamples = Vec::new();
                 sb.extend_from_slice(buf);
+                // info!("Got: {} len {}", n, sb.len());
                 samples.send(sb).await;
             }
             Err(e) => {
                 // error!("Read: {:?}", e);
-                Timer::after_millis(100).await;
+                Timer::after_millis(1).await;
             }
         }
     }
@@ -196,22 +197,23 @@ async fn main(spawner: Spawner) {
     // unsafe { NVIC::unmask(pac::interrupt::SPI3) };
 
     for sample in SAMPLES_1K_HZ {
-        write.push(sample);
-        write.push(sample);
+        unwrap!(write.push(sample));
+        unwrap!(write.push(sample));
     }
 
     let mut sm = write.iter().cycle();
 
-    //nfo!("write I2S {}", n);
-    for n in 0u32..2000 {
-        let mut buf: T_Samples = Vec::new();
-        for _ in 0..32 {
+    info!("write I2S");
+    for _ in 0u32..2000 {
+        let mut buf: TSamples = Vec::new();
+        for _ in 0..write.capacity() {
             buf.push(sm.next().copied().unwrap()).unwrap();
         }
 
-        //i2s.writer(&write);
+        // unwrap!(i2s.writer(&buf));
+
         match select(sample_chan.send(buf), Timer::after_millis(1000)).await {
-            Either::First(_) => {}
+            Either::First(()) => {}
             Either::Second(()) => {
                 println!("Timer");
             }
@@ -227,7 +229,7 @@ async fn main(spawner: Spawner) {
         Irqs,
         p.PA12,
         p.PA11,
-        EP_OUT_BUFFER.init([0; 256]),
+        EP_OUT_BUFFER.init([0; 512]),
         config,
     );
 
@@ -256,8 +258,8 @@ async fn main(spawner: Spawner) {
         CONTROL_BUF.init([0; 256]),
     );
 
-    let mut class =
-        usb_audio_class::AudioClass::new(&mut builder, AUDIO_STATE.init(State::default()), 64);
+    let class =
+        usb_audio_class::AudioClass::new(&mut builder, AUDIO_STATE.init(State::default()), 200);
     // Build the builder.
     let usb = builder.build();
 
@@ -278,7 +280,7 @@ async fn main(spawner: Spawner) {
 
         // //nfo!("write I2S {}", n);
         // for n in 0u32..1000 {
-        //     let mut buf: T_Samples = Vec::new();
+        //     let mut buf: TSamples = Vec::new();
         //     for _ in 0..32 {
         //         buf.push(sm.next().copied().unwrap()).unwrap();
         //     }

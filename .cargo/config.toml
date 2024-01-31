@@ -1,5 +1,5 @@
 [target.thumbv7em-none-eabihf]
-runner = 'probe-rs run --chip STM32F401CCUx' #--connect-under-reset'
+runner = 'probe-rs run --chip STM32F401CCUx' # --connect-under-reset'
 rustflags = [
   "-C", "link-arg=-Tlink.x",
   "-C", "link-arg=-Tdefmt.x",
