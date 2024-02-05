@@ -3,7 +3,7 @@
 #![deny(clippy::pedantic)]
 #![allow(unused_imports)]
 
-use crate::i2s_process::{I2cPlayer, TSamples};
+// use crate::i2s_process::{I2cPlayer, TSamples};
 use core::borrow::BorrowMut;
 use core::fmt::Write;
 use core::ptr::slice_from_raw_parts;
@@ -11,6 +11,8 @@ use cortex_m::peripheral::NVIC;
 use defmt::{error, info, println, unwrap};
 use embassy_executor::Spawner;
 use embassy_futures::select::{select, Either};
+use embassy_stm32::dma::word::Word;
+use embassy_stm32::dma::NoDma;
 use embassy_stm32::gpio::Output;
 use embassy_stm32::i2c::{Config as I2CConfig, I2c};
 use embassy_stm32::peripherals::USB_OTG_FS;
@@ -31,7 +33,7 @@ use {defmt_rtt as _, panic_probe as _};
 use embassy_usb::driver::EndpointError;
 use embassy_usb::Builder;
 
-mod i2s_process;
+// mod i2s_process;
 
 bind_interrupts!(struct Irqs {
     I2C1_EV => i2c::EventInterruptHandler<peripherals::I2C1>;
@@ -55,20 +57,15 @@ const SAMPLES_1K_HZ: [u16; 48] = [
 
 mod timer2;
 
-#[embassy_executor::task]
-async fn i2s_runner(
-    mut i2s: I2cPlayer<
-        NoopRawMutex,
-        peripherals::SPI3,
-        peripherals::DMA1_CH7,
-        peripherals::DMA1_CH0,
-    >,
-) {
-    loop {
-        info!("init i2c runner");
-        i2s.run().await;
-    }
-}
+// #[embassy_executor::task]
+// async fn i2s_runner(
+//     mut i2s: I2cPlayer<NoopRawMutex, peripherals::SPI3, NoDma, NoDma, peripherals::DMA1_CH7>,
+// ) {
+//     loop {
+//         info!("init i2c runner");
+//         i2s.run().await;
+//     }
+// }
 
 #[repr(align(8))]
 struct SampleBuffer(pub [u8; 200]);
@@ -96,12 +93,15 @@ static BOS_DESC: StaticCell<[u8; 256]> = StaticCell::new();
 // static MSOS_DESC: StaticCell<[u8; 128]> = StaticCell::new();
 static CONTROL_BUF: StaticCell<[u8; 256]> = StaticCell::new();
 static AUDIO_STATE: StaticCell<State> = StaticCell::new();
-static SANPLE_BUF: StaticCell<Channel<NoopRawMutex, TSamples, 10>> = StaticCell::new();
+// static SANPLE_BUF: StaticCell<Channel<NoopRawMutex, TSamples, 10>> = StaticCell::new();
+
+static SAMPLE_DMABUF: StaticCell<[u16; 192]> = StaticCell::new();
 
 #[embassy_executor::task]
 async fn usb_samples_task(
     mut uac: AudioClass<'static, Driver<'static, USB_OTG_FS>>,
-    samples: Sender<'static, NoopRawMutex, TSamples, 10>,
+    //samples: Sender<'static, NoopRawMutex, TSamples, 10>,
+    mut i2s: I2S<'static, peripherals::SPI3, peripherals::DMA1_CH7, u16>,
 ) {
     let mut packet_buf = SampleBuffer::new();
     loop {
@@ -110,10 +110,11 @@ async fn usb_samples_task(
                 let buf_orig = &packet_buf.0[0..n & 0xFFFE];
                 let buf = slice_from_raw_parts(buf_orig.as_ptr().cast::<u16>(), buf_orig.len() / 2);
                 let buf = unsafe { &*buf };
-                let mut sb: TSamples = Vec::new();
-                unwrap!(sb.extend_from_slice(buf));
+                // let mut sb: TSamples = Vec::new();
+                // unwrap!(sb.extend_from_slice(buf));
                 // info!("Got: {} len {}", n, sb.len());
-                samples.send(sb).await;
+                // samples.send(sb).await;
+                i2s.write(buf).await;
             }
             Err(e) => {
                 // error!("Read: {:?}", e);
@@ -177,22 +178,22 @@ async fn main(spawner: Spawner) {
     i2s_cfg.format = Format::Data16Channel16;
     i2s_cfg.master_clock = false;
 
-    let i2s = I2S::new_no_mck(
+    let mut i2s = I2S::new_no_mck(
         p.SPI3,
         p.PB5,      // sd - DAta (Sample Data)
         p.PA15,     // ws - LRCK ( Data L/R )
         p.PB3,      // ck - SCK (Sample clock)
         p.DMA1_CH7, // Chab 0 SPI3_TX
-        p.DMA1_CH0,
+        SAMPLE_DMABUF.init([0; 192]),
         Hertz(48_000),
         i2s_cfg,
     );
 
-    let sample_chan = SANPLE_BUF.init(Channel::new());
+    // let sample_chan = SANPLE_BUF.init(Channel::new());
 
-    let i2c_play = I2cPlayer::new(i2s, sample_chan.receiver());
+    // let i2c_play = I2cPlayer::new(i2s, sample_chan.receiver());
 
-    unwrap!(spawner.spawn(i2s_runner(i2c_play)));
+    // unwrap!(spawner.spawn(i2s_runner(i2c_play)));
 
     let mut write: Vec<u16, 96> = Vec::new();
 
@@ -209,17 +210,22 @@ async fn main(spawner: Spawner) {
 
     let mut sm = write.iter().cycle();
 
+    i2s.start();
+
     info!("write I2S");
-    for _ in 0u32..2000 {
-        let mut buf: TSamples = Vec::new();
+    for _ in 0u32..500 {
+        let mut buf: Vec<u16, 96> = Vec::new();
         for _ in 0..write.capacity() {
             buf.push(sm.next().copied().unwrap()).unwrap();
         }
 
         // unwrap!(i2s.writer(&buf));
 
-        match select(sample_chan.send(buf), Timer::after_millis(1000)).await {
-            Either::First(()) => {}
+        // match select(sample_chan.send(buf), Timer::after_millis(1000)).await {
+        match select(i2s.write(&buf), Timer::after_millis(1000)).await {
+            Either::First(e) => {
+                unwrap!(e);
+            }
             Either::Second(()) => {
                 println!("Timer");
             }
@@ -227,6 +233,13 @@ async fn main(spawner: Spawner) {
     }
 
     info!("write I2S Done");
+
+    let mut buf: Vec<u16, 96> = Vec::new();
+    for _ in 0..write.capacity() {
+        buf.push(0).unwrap();
+    }
+    unwrap!(i2s.write(&buf).await);
+    unwrap!(i2s.write(&buf).await);
 
     let mut config = embassy_stm32::usb_otg::Config::default();
     config.vbus_detection = false;
@@ -275,7 +288,8 @@ async fn main(spawner: Spawner) {
 
     Timer::after(Duration::from_millis(10)).await;
 
-    unwrap!(spawner.spawn(usb_samples_task(class, sample_chan.sender())));
+    // unwrap!(spawner.spawn(usb_samples_task(class, sample_chan.sender())));
+    unwrap!(spawner.spawn(usb_samples_task(class, i2s)));
 
     loop {
         // class.wait_connection().await;
