@@ -16,7 +16,7 @@ use embassy_stm32::dma::NoDma;
 use embassy_stm32::gpio::Output;
 use embassy_stm32::i2c::{Config as I2CConfig, I2c};
 use embassy_stm32::peripherals::USB_OTG_FS;
-use embassy_stm32::spi::{Config as SPIConfig, Spi};
+use embassy_stm32::spi::{Config as SPIConfig, Polarity, Spi};
 use embassy_stm32::time::Hertz;
 use embassy_stm32::timer::low_level::CaptureCompare16bitInstance;
 use embassy_stm32::usb_otg::Driver;
@@ -41,7 +41,9 @@ bind_interrupts!(struct Irqs {
     OTG_FS => usb_otg::InterruptHandler<peripherals::USB_OTG_FS>;
 });
 
-use embassy_stm32::i2s::{Config as I2SConfig, Format, I2S};
+use embassy_stm32::i2s::{
+    ClockPolarity, Config as I2SConfig, Format, Function, Mode, Standard, I2S,
+};
 use static_cell::StaticCell;
 use usb_audio_class::{AudioClass, State};
 
@@ -68,11 +70,15 @@ mod timer2;
 // }
 
 #[repr(align(8))]
-struct SampleBuffer(pub [u8; 200]);
+struct SampleBuffer(pub [u16; 100]);
 
 impl SampleBuffer {
     pub fn new() -> Self {
-        Self([0; 200])
+        Self([0; 100])
+    }
+
+    pub fn as_mut_ptr(&mut self) -> &mut [u8] {
+        unsafe { self.0.align_to_mut::<u8>().1 }
     }
 }
 
@@ -95,7 +101,13 @@ static CONTROL_BUF: StaticCell<[u8; 256]> = StaticCell::new();
 static AUDIO_STATE: StaticCell<State> = StaticCell::new();
 // static SANPLE_BUF: StaticCell<Channel<NoopRawMutex, TSamples, 10>> = StaticCell::new();
 
-static SAMPLE_DMABUF: StaticCell<[u16; 192]> = StaticCell::new();
+static SAMPLE_DMABUF: StaticCell<[u16; 4 * 96]> = StaticCell::new();
+
+enum I2SStatus {
+    Waiting,
+    Buffering(u8),
+    Running,
+}
 
 #[embassy_executor::task]
 async fn usb_samples_task(
@@ -103,22 +115,34 @@ async fn usb_samples_task(
     //samples: Sender<'static, NoopRawMutex, TSamples, 10>,
     mut i2s: I2S<'static, peripherals::SPI3, peripherals::DMA1_CH7, u16>,
 ) {
+    let mut status = I2SStatus::Waiting;
     let mut packet_buf = SampleBuffer::new();
+
     loop {
-        match uac.read_packet(&mut packet_buf.0).await {
-            Ok(n) => {
-                let buf_orig = &packet_buf.0[0..n & 0xFFFE];
-                let buf = slice_from_raw_parts(buf_orig.as_ptr().cast::<u16>(), buf_orig.len() / 2);
-                let buf = unsafe { &*buf };
-                // let mut sb: TSamples = Vec::new();
-                // unwrap!(sb.extend_from_slice(buf));
-                // info!("Got: {} len {}", n, sb.len());
-                // samples.send(sb).await;
-                i2s.write(buf).await;
-            }
-            Err(e) => {
-                // error!("Read: {:?}", e);
-                Timer::after_millis(1).await;
+        status = I2SStatus::Waiting;
+        i2s.stop();
+        uac.wait_connection().await;
+        loop {
+            match uac.read_packet(packet_buf.as_mut_ptr()).await {
+                Ok(n) => {
+                    let buf_orig = &packet_buf.0[0..n / 2];
+                    i2s.write(buf_orig).await;
+                    match &mut status {
+                        I2SStatus::Waiting => status = I2SStatus::Buffering(4),
+                        I2SStatus::Buffering(n) => {
+                            *n -= 1;
+                            if *n == 0 {
+                                status = I2SStatus::Running;
+                                i2s.start();
+                            }
+                        }
+                        I2SStatus::Running => (),
+                    }
+                }
+                Err(e) => {
+                    error!("Read: {:?}", e);
+                    break;
+                }
             }
         }
     }
@@ -177,6 +201,10 @@ async fn main(spawner: Spawner) {
     let mut i2s_cfg = I2SConfig::default();
     i2s_cfg.format = Format::Data16Channel16;
     i2s_cfg.master_clock = false;
+    i2s_cfg.clock_polarity = ClockPolarity::IdleLow;
+    i2s_cfg.mode = Mode::Master;
+    i2s_cfg.standard = Standard::Philips;
+    i2s_cfg.function = Function::Transmit;
 
     let mut i2s = I2S::new_no_mck(
         p.SPI3,
@@ -184,7 +212,7 @@ async fn main(spawner: Spawner) {
         p.PA15,     // ws - LRCK ( Data L/R )
         p.PB3,      // ck - SCK (Sample clock)
         p.DMA1_CH7, // Chab 0 SPI3_TX
-        SAMPLE_DMABUF.init([0; 192]),
+        SAMPLE_DMABUF.init([0; 384]),
         Hertz(48_000),
         i2s_cfg,
     );
