@@ -189,7 +189,7 @@ impl<'d, D: Driver<'d>> AudioClass<'d, D> {
         // bmaControls(0)
         feat_term_desc.extend_from_slice((0x0003_u16).to_le_bytes().as_slice());
         feat_term_desc.extend_from_slice((0x0000_u16).to_le_bytes().as_slice());
-        // feat_term_desc.extend_from_slice((0x0000_u16).to_le_bytes().as_slice());
+        feat_term_desc.extend_from_slice((0x0000_u16).to_le_bytes().as_slice());
 
         // iFeature
         feat_term_desc.push(0x00);
@@ -311,11 +311,11 @@ impl<'d, D: Driver<'d>> AudioClass<'d, D> {
         self.read_ep.info().max_packet_size
     }
 
-    /// Writes a single packet into the IN endpoint.
-    pub async fn write_packet(&mut self, data: &[u8]) -> Result<(), EndpointError> {
-        Err(EndpointError::Disabled)
-        // self.write_ep.write(data).await
-    }
+    // /// Writes a single packet into the IN endpoint.
+    // pub async fn write_packet(&mut self, data: &[u8]) -> Result<(), EndpointError> {
+    //     Err(EndpointError::Disabled)
+    //     // self.write_ep.write(data).await
+    // }
 
     /// Reads a single packet from the OUT endpoint.
     pub async fn read_packet(&mut self, data: &mut [u8]) -> Result<usize, EndpointError> {

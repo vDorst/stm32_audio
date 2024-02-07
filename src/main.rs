@@ -51,10 +51,10 @@ mod audio;
 mod usb_audio_class;
 
 const SAMPLES_1K_HZ: [u16; 48] = [
-    32767, 37044, 41248, 45307, 49151, 52715, 55937, 58763, 61144, 63040, 64418, 65254, 65535,
-    65254, 64418, 63040, 61144, 58763, 55937, 52715, 49151, 45307, 41248, 37044, 32767, 28490,
-    24286, 20227, 16383, 12819, 9597, 6771, 4390, 2494, 1116, 280, 0, 280, 1116, 2494, 4390, 6771,
-    9597, 12819, 16383, 20227, 24286, 28490,
+    0x0000, 0x10b5, 0x2120, 0x30fb, 0x4000, 0x4deb, 0x5a82, 0x658c, 0x6ed9, 0x7641, 0x7ba3, 0x7ee7,
+    0x7fff, 0x7ee7, 0x7ba3, 0x7641, 0x6ed9, 0x658c, 0x5a82, 0x4deb, 0x3fff, 0x30fb, 0x2120, 0x10b5,
+    0x0000, 0xef4b, 0xdee0, 0xcf05, 0xc000, 0xb215, 0xa57e, 0x9a74, 0x9127, 0x89bf, 0x845d, 0x8119,
+    0x8000, 0x8119, 0x845d, 0x89bf, 0x9127, 0x9a74, 0xa57e, 0xb215, 0xc001, 0xcf05, 0xdee0, 0xef4b,
 ];
 
 mod timer2;
@@ -101,8 +101,11 @@ static CONTROL_BUF: StaticCell<[u8; 256]> = StaticCell::new();
 static AUDIO_STATE: StaticCell<State> = StaticCell::new();
 // static SANPLE_BUF: StaticCell<Channel<NoopRawMutex, TSamples, 10>> = StaticCell::new();
 
-static SAMPLE_DMABUF: StaticCell<[u16; 4 * 96]> = StaticCell::new();
+const SAMPLES: usize = 48 * 2 * 2 / 2 * 8;
 
+static SAMPLE_DMABUF: StaticCell<[u16; SAMPLES]> = StaticCell::new();
+
+#[derive(Debug, defmt::Format)]
 enum I2SStatus {
     Waiting,
     Buffering(u8),
@@ -114,30 +117,51 @@ async fn usb_samples_task(
     mut uac: AudioClass<'static, Driver<'static, USB_OTG_FS>>,
     //samples: Sender<'static, NoopRawMutex, TSamples, 10>,
     mut i2s: I2S<'static, peripherals::SPI3, peripherals::DMA1_CH7, u16>,
+    mut status_pin: Output<'static>,
 ) {
-    let mut status = I2SStatus::Waiting;
+    let mut status;
     let mut packet_buf = SampleBuffer::new();
+    let mut cnt = 1;
+    let mut total = 0;
 
     loop {
+        info!("Wait for USB Audio samples");
         status = I2SStatus::Waiting;
+        status_pin.set_high();
         i2s.stop();
         uac.wait_connection().await;
+        i2s.start();
         loop {
             match uac.read_packet(packet_buf.as_mut_ptr()).await {
                 Ok(n) => {
+                    status_pin.toggle();
+                    total += n;
                     let buf_orig = &packet_buf.0[0..n / 2];
-                    i2s.write(buf_orig).await;
-                    match &mut status {
-                        I2SStatus::Waiting => status = I2SStatus::Buffering(4),
-                        I2SStatus::Buffering(n) => {
-                            *n -= 1;
-                            if *n == 0 {
-                                status = I2SStatus::Running;
-                                i2s.start();
-                            }
-                        }
-                        I2SStatus::Running => (),
+                    cnt -= 1;
+                    let mut rem = 0;
+                    // rem = i2s.write(buf_orig).await;
+                    if cnt == 0 {
+                        info!(
+                            "GOT: {} BL {} S {} T {} R {}",
+                            n,
+                            buf_orig.len(),
+                            status,
+                            total,
+                            rem
+                        );
+                        cnt = 1000;
+                        total = 0;
                     }
+                    // match &mut status {
+                    //     I2SStatus::Waiting => status = I2SStatus::Buffering(1),
+                    //     I2SStatus::Buffering(n) => {
+                    //         *n -= 1;
+                    //         if *n == 0 {
+                    //             status = I2SStatus::Running;
+                    //         }
+                    //     }
+                    //     I2SStatus::Running => (),
+                    // }
                 }
                 Err(e) => {
                     error!("Read: {:?}", e);
@@ -164,16 +188,18 @@ async fn main(spawner: Spawner) {
         config.rcc.pll = Some(Pll {
             prediv: PllPreDiv::DIV25,
             mul: PllMul::MUL336,
-            divp: Some(PllPDiv::DIV4), // 25mhz / 25 * 336 / 4 = 48Mhz.
-            divq: Some(PllQDiv::DIV7), // 25mhz / 25 * 336 / 7 = 84Mhz.
+            divp: Some(PllPDiv::DIV4), // 25mhz / 25 * 336 / 4 = 84Mhz.
+            divq: Some(PllQDiv::DIV7), // 25mhz / 25 * 336 / 7 = 48Mhz.
             divr: None,
         });
 
         config.rcc.plli2s = Some(Pll {
             prediv: PllPreDiv::DIV25,
-            mul: PllMul::MUL192,
+            // PLLI2SN
+            mul: PllMul::MUL384,
             divp: None,
             divq: None,
+            // PLLI2SR
             divr: Some(PllRDiv::DIV5),
         });
 
@@ -189,9 +215,15 @@ async fn main(spawner: Spawner) {
     let tmr2 = timer2::CCTIM2::new(p.TIM2.into_ref(), timer2::ITR1_RMP::OTG_FS_SOF);
 
     let mut led_status = Output::new(
-        p.PC13,
+        p.PC14,
         embassy_stm32::gpio::Level::Low,
         embassy_stm32::gpio::Speed::Low,
+    );
+
+    let status_pin = Output::new(
+        p.PC13,
+        embassy_stm32::gpio::Level::Low,
+        embassy_stm32::gpio::Speed::VeryHigh,
     );
 
     println!("Setup TIM2");
@@ -199,7 +231,7 @@ async fn main(spawner: Spawner) {
     info!("Setup I2S");
 
     let mut i2s_cfg = I2SConfig::default();
-    i2s_cfg.format = Format::Data16Channel16;
+    i2s_cfg.format = Format::Data16Channel32;
     i2s_cfg.master_clock = false;
     i2s_cfg.clock_polarity = ClockPolarity::IdleLow;
     i2s_cfg.mode = Mode::Master;
@@ -212,7 +244,7 @@ async fn main(spawner: Spawner) {
         p.PA15,     // ws - LRCK ( Data L/R )
         p.PB3,      // ck - SCK (Sample clock)
         p.DMA1_CH7, // Chab 0 SPI3_TX
-        SAMPLE_DMABUF.init([0; 384]),
+        SAMPLE_DMABUF.init([0; SAMPLES]),
         Hertz(48_000),
         i2s_cfg,
     );
@@ -232,6 +264,7 @@ async fn main(spawner: Spawner) {
     // unsafe { NVIC::unmask(pac::interrupt::SPI3) };
 
     for sample in SAMPLES_1K_HZ {
+        //let sample = sample.wrapping_add(0xEFFF);
         unwrap!(write.push(sample));
         unwrap!(write.push(sample));
     }
@@ -241,7 +274,7 @@ async fn main(spawner: Spawner) {
     i2s.start();
 
     info!("write I2S");
-    for _ in 0u32..500 {
+    for _ in 0u32..1000 {
         let mut buf: Vec<u16, 96> = Vec::new();
         for _ in 0..write.capacity() {
             buf.push(sm.next().copied().unwrap()).unwrap();
@@ -266,6 +299,8 @@ async fn main(spawner: Spawner) {
     for _ in 0..write.capacity() {
         buf.push(0).unwrap();
     }
+    unwrap!(i2s.write(&buf).await);
+    unwrap!(i2s.write(&buf).await);
     unwrap!(i2s.write(&buf).await);
     unwrap!(i2s.write(&buf).await);
 
@@ -317,14 +352,14 @@ async fn main(spawner: Spawner) {
     Timer::after(Duration::from_millis(10)).await;
 
     // unwrap!(spawner.spawn(usb_samples_task(class, sample_chan.sender())));
-    unwrap!(spawner.spawn(usb_samples_task(class, i2s)));
+    unwrap!(spawner.spawn(usb_samples_task(class, i2s, status_pin)));
 
     loop {
         // class.wait_connection().await;
         // info!("EP Connected");
         led_status.toggle();
 
-        Timer::after_millis(5000).await;
+        Timer::after_millis(500).await;
 
         // //nfo!("write I2S {}", n);
         // for n in 0u32..1000 {
