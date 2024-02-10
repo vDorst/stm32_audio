@@ -99,7 +99,7 @@ const PROTOCOL_NONE: u8 = 0x00;
 ///   terminated with a short packet, even if the bulk endpoint is used for stream-like data.
 pub struct AudioClass<'d, D: Driver<'d>> {
     read_ep: D::EndpointOut,
-    //write_ep: D::EndpointOut,
+    // write_ep: D::EndpointIn,
 }
 
 impl<'d, D: Driver<'d>> AudioClass<'d, D> {
@@ -133,7 +133,21 @@ impl<'d, D: Driver<'d>> AudioClass<'d, D> {
 
         // AudioStreaming interface
 
-        let midi_streaming_total_length: u16 = 9 + 12 + 13 + 9;
+        let midi_streaming_total_length: u16 = 30;
+
+        //Audio Control Interface Header Descriptor
+        // Table 4-2: Class-Specific AC Interface Header Descriptor
+        let mut inp_header_desc = Vec::<u8, 9>::new();
+        // bDescriptorSubtype
+        inp_header_desc.push(TerminalDescriptorSubType::HEADER as u8);
+        // bcdADC
+        inp_header_desc.extend_from_slice((0x0100_u16).to_le_bytes().as_slice());
+        // wTotalLength
+        inp_header_desc.extend_from_slice(midi_streaming_total_length.to_le_bytes().as_slice());
+        // bInCollection
+        inp_header_desc.push(0x01);
+        // baInterfaceNr(1)
+        inp_header_desc.push(0x01);
 
         // Input terminal ID = 0x01
         if0_alt.descriptor(
@@ -175,28 +189,6 @@ impl<'d, D: Driver<'d>> AudioClass<'d, D> {
         // Input terminal ID = 0x01
         if0_alt.descriptor(ACSFT::CS_INTERFACE as u8, &inp_term_desc);
 
-        // Table 4-7: Feature Unit Descriptor
-        let mut feat_term_desc = Vec::<u8, 16>::new();
-        // bDescriptorSubtype
-        feat_term_desc.push(TerminalDescriptorSubType::FEATURE_UNIT as u8);
-        // bUnitID
-        feat_term_desc.push(0x02);
-        // bSourceID
-        feat_term_desc.push(0x01);
-        // bControlSize
-        feat_term_desc.push(0x02);
-
-        // bmaControls(0)
-        feat_term_desc.extend_from_slice((0x0003_u16).to_le_bytes().as_slice());
-        feat_term_desc.extend_from_slice((0x0000_u16).to_le_bytes().as_slice());
-        feat_term_desc.extend_from_slice((0x0000_u16).to_le_bytes().as_slice());
-
-        // iFeature
-        feat_term_desc.push(0x00);
-
-        // Feature Unit terminal ID = 0x02
-        if0_alt.descriptor(ACSFT::CS_INTERFACE as u8, &feat_term_desc);
-
         // Table 4-4: Output Terminal Descriptor
         let mut out_term_desc = Vec::<u8, 10>::new();
         // bDescriptorSubtype
@@ -212,12 +204,18 @@ impl<'d, D: Driver<'d>> AudioClass<'d, D> {
         // bAssocTerminal
         out_term_desc.push(0x01);
         // bSourceID
-        out_term_desc.push(0x02);
+        out_term_desc.push(0x01);
         // iTerminal
         out_term_desc.push(0x00);
 
         // Output terminal ID = 0x03
         if0_alt.descriptor(ACSFT::CS_INTERFACE as u8, &out_term_desc);
+
+        info!(
+            "{} == {}",
+            midi_streaming_total_length,
+            out_term_desc.len() + inp_term_desc.len() + 4 + 9
+        );
 
         // A interface
         let mut iface1 = cfg_desc.interface();
@@ -241,43 +239,58 @@ impl<'d, D: Driver<'d>> AudioClass<'d, D> {
             None,
         );
 
+        //Audio Streaming Class Specific Interface Descriptor
         // AS Interface Descriptor
         alt.descriptor(
             ACSFT::CS_INTERFACE as u8,
             &[
-                TerminalDescriptorSubType::HEADER as u8,
-                0x01,
-                0x01,
-                0x01,
-                0x00,
+                // bDescriptorSubtype
+                0x01, // bTerminalLink
+                0x01, // bDelay
+                0x01, // wFormatTag
+                0x01, 0x00,
             ],
         );
 
+        //Audio Streaming Format Type Descriptor
+        // Type I Format Type Descriptor
         // AS Interface Descriptor
         alt.descriptor(
             ACSFT::CS_INTERFACE as u8,
             &[
+                // bDescriptorSubtype
                 0x02, // Format_Type
-                0x01, 0x02, 0x02, 16, 0x01, 0x80, 0xBB,
-                0x00,
+                0x01, // nChannels
+                0x02, // bSubFrameSize
+                0x02, // bBitResolution
+                0x10, // Number of supported freq
+                0x01, // Frequency
+                0x80, 0xBB, 0x00,
                 // 0x00,
                 // 0x77,
                 // 0x01,
             ],
         );
 
+        // Standard AS Isochronous Audio Data Endpoint Descriptor
         let samples_ep = alt.endpoint_isochronous_out(max_packet_size, 1);
 
+        //Audio Streaming Class Specific Audio Data Endpoint Descriptor
         alt.descriptor(
             ACSFT::CS_ENDPOINT as u8,
             &[
                 TerminalDescriptorSubType::HEADER as u8,
                 0x01, // Sampling Freq. MaxPackets ONly
                 0x00,
-                0x00,
-                0x00,
+                0x02,
+                0x04,
             ],
         );
+
+        // Standard AS Isochronous Audio Data Endpoint Descriptor
+        // let rate_ep = alt.endpoint_interrupt_in(3, 1);
+
+        //Standard AS Isochronous Synch Endpoint Descriptor
 
         // let sync_ep = alt.endpoint_interrupt_out(3, 1);
         // alt.descriptor(
@@ -301,7 +314,7 @@ impl<'d, D: Driver<'d>> AudioClass<'d, D> {
 
         AudioClass {
             read_ep: samples_ep,
-            //write_ep: sync_ep,
+            // write_ep: rate_ep,
         }
     }
 
@@ -311,10 +324,9 @@ impl<'d, D: Driver<'d>> AudioClass<'d, D> {
         self.read_ep.info().max_packet_size
     }
 
-    // /// Writes a single packet into the IN endpoint.
+    // // /// Writes a single packet into the IN endpoint.
     // pub async fn write_packet(&mut self, data: &[u8]) -> Result<(), EndpointError> {
-    //     Err(EndpointError::Disabled)
-    //     // self.write_ep.write(data).await
+    //     self.write_ep.write(data).await
     // }
 
     /// Reads a single packet from the OUT endpoint.

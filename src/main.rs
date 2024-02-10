@@ -18,7 +18,6 @@ use embassy_stm32::i2c::{Config as I2CConfig, I2c};
 use embassy_stm32::peripherals::USB_OTG_FS;
 use embassy_stm32::spi::{Config as SPIConfig, Polarity, Spi};
 use embassy_stm32::time::Hertz;
-use embassy_stm32::timer::low_level::CaptureCompare16bitInstance;
 use embassy_stm32::usb_otg::Driver;
 use embassy_stm32::{bind_interrupts, i2c, pac, peripherals, usb_otg, Config, Peripheral};
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
@@ -101,7 +100,7 @@ static CONTROL_BUF: StaticCell<[u8; 256]> = StaticCell::new();
 static AUDIO_STATE: StaticCell<State> = StaticCell::new();
 // static SANPLE_BUF: StaticCell<Channel<NoopRawMutex, TSamples, 10>> = StaticCell::new();
 
-const SAMPLES: usize = 48 * 2 * 2 / 2 * 8;
+const SAMPLES: usize = 48 * 2 * 2 / 2 * 4;
 
 static SAMPLE_DMABUF: StaticCell<[u16; SAMPLES]> = StaticCell::new();
 
@@ -129,6 +128,7 @@ async fn usb_samples_task(
         status = I2SStatus::Waiting;
         status_pin.set_high();
         i2s.stop();
+        // uac.write_packet(&[0x01, 0x2, 0x0]).await;
         uac.wait_connection().await;
         i2s.start();
         loop {
@@ -138,8 +138,8 @@ async fn usb_samples_task(
                     total += n;
                     let buf_orig = &packet_buf.0[0..n / 2];
                     cnt -= 1;
-                    let mut rem = 0;
-                    // rem = i2s.write(buf_orig).await;
+                    let mut rem = Ok(0);
+                    rem = i2s.write(buf_orig).await;
                     if cnt == 0 {
                         info!(
                             "GOT: {} BL {} S {} T {} R {}",
@@ -328,7 +328,7 @@ async fn main(spawner: Spawner) {
     config.device_class = 0xEF;
     config.device_sub_class = 0x02;
     config.device_protocol = 0x01;
-    config.composite_with_iads = true;
+    config.composite_with_iads = false;
 
     let mut builder = Builder::new(
         driver,

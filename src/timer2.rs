@@ -1,12 +1,12 @@
 use core::ops::DerefMut;
 
 use defmt::println;
-use embassy_stm32::pac::timer::vals::{CcmrInputCcs, Dir, Icf};
+use embassy_stm32::pac::timer::vals::{CcmrInputCcs, Dir, FilterValue};
 use embassy_stm32::pac::timer::TimGp32;
 use embassy_stm32::pac::RCC;
 use embassy_stm32::peripherals::TIM2;
 use embassy_stm32::rcc::low_level::RccPeripheral;
-use embassy_stm32::timer::low_level::{CaptureCompare16bitInstance, GeneralPurpose32bitInstance};
+use embassy_stm32::timer::low_level::{GeneralPurpose16bitInstance, GeneralPurpose32bitInstance};
 use embassy_stm32::timer::{CaptureCompare32bitInstance, Channel, InputTISelection};
 use embassy_stm32::{interrupt, PeripheralRef, Peripherals};
 
@@ -40,7 +40,7 @@ impl CCTIM2 {
 
         timer2.set_input_ti_selection(Channel::Ch1, InputTISelection::TRC);
         timer2.set_input_capture_prescaler(Channel::Ch1, 0);
-        timer2.set_input_capture_filter(Channel::Ch1, Icf::FCK_INT_N2);
+        timer2.set_input_capture_filter(Channel::Ch1, FilterValue::FCK_INT_N2);
 
         // Set TIM2 option register (TIM2_OR): See `RM0368`
         {
@@ -58,7 +58,7 @@ impl CCTIM2 {
 
         // Set Input Compate first channel
         tmr2.ccmr_input(0).modify(|w| {
-            w.set_icf(0, Icf::NOFILTER);
+            w.set_icf(0, FilterValue::NOFILTER);
             w.set_ccs(0, CcmrInputCcs::TRC);
             w.set_icpsc(0, 0);
         });
