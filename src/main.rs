@@ -122,6 +122,7 @@ async fn usb_samples_task(
     let mut packet_buf = SampleBuffer::new();
     let mut cnt = 1;
     let mut total = 0;
+    let (mut tx, mut rx) = uac.split();
 
     loop {
         info!("Wait for USB Audio samples");
@@ -129,44 +130,52 @@ async fn usb_samples_task(
         status_pin.set_high();
         i2s.stop();
         // uac.write_packet(&[0x01, 0x2, 0x0]).await;
-        uac.wait_connection().await;
+        rx.wait_connection().await;
         i2s.start();
         loop {
-            match uac.read_packet(packet_buf.as_mut_ptr()).await {
-                Ok(n) => {
-                    status_pin.toggle();
-                    total += n;
-                    let buf_orig = &packet_buf.0[0..n / 2];
-                    cnt -= 1;
-                    let mut rem = Ok(0);
-                    rem = i2s.write(buf_orig).await;
-                    if cnt == 0 {
-                        info!(
-                            "GOT: {} BL {} S {} T {} R {}",
-                            n,
-                            buf_orig.len(),
-                            status,
-                            total,
-                            rem
-                        );
-                        cnt = 1000;
-                        total = 0;
+            match select(
+                rx.read_packet(packet_buf.as_mut_ptr()),
+                tx.write_packet(&[0x01, 0x2, 0x0]),
+            )
+            .await
+            {
+                Either::First(samples) => match samples {
+                    Ok(n) => {
+                        status_pin.toggle();
+                        total += n;
+                        let buf_orig = &packet_buf.0[0..n / 2];
+                        cnt -= 1;
+                        let mut rem = 0;
+                        //rem = i2s.write(buf_orig).await;
+                        if cnt == 0 {
+                            info!(
+                                "GOT: {} BL {} S {} T {} R {}",
+                                n,
+                                buf_orig.len(),
+                                status,
+                                total,
+                                rem
+                            );
+                            cnt = 1000;
+                            total = 0;
+                        }
+                        // match &mut status {
+                        //     I2SStatus::Waiting => status = I2SStatus::Buffering(1),
+                        //     I2SStatus::Buffering(n) => {
+                        //         *n -= 1;
+                        //         if *n == 0 {
+                        //             status = I2SStatus::Running;
+                        //         }
+                        //     }
+                        //     I2SStatus::Running => (),
+                        // }
                     }
-                    // match &mut status {
-                    //     I2SStatus::Waiting => status = I2SStatus::Buffering(1),
-                    //     I2SStatus::Buffering(n) => {
-                    //         *n -= 1;
-                    //         if *n == 0 {
-                    //             status = I2SStatus::Running;
-                    //         }
-                    //     }
-                    //     I2SStatus::Running => (),
-                    // }
-                }
-                Err(e) => {
-                    error!("Read: {:?}", e);
-                    break;
-                }
+                    Err(e) => {
+                        error!("Read: {:?}", e);
+                        break;
+                    }
+                },
+                Either::Second(ret) => {}
             }
         }
     }
