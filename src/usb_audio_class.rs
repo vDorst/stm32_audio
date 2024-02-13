@@ -99,7 +99,7 @@ const PROTOCOL_NONE: u8 = 0x00;
 ///   terminated with a short packet, even if the bulk endpoint is used for stream-like data.
 pub struct AudioClass<'d, D: Driver<'d>> {
     read_ep: D::EndpointOut,
-    write_ep: D::EndpointIn,
+    // write_ep: D::EndpointIn,
 }
 
 impl<'d, D: Driver<'d>> AudioClass<'d, D> {
@@ -292,17 +292,17 @@ impl<'d, D: Driver<'d>> AudioClass<'d, D> {
 
         //Standard AS Isochronous Synch Endpoint Descriptor
 
-        let sync_ep = alt.endpoint_interrupt_in(3, 1);
-        alt.descriptor(
-            ACSFT::CS_ENDPOINT as u8,
-            &[
-                TerminalDescriptorSubType::HEADER as u8,
-                0x00,
-                0x00,
-                0x00,
-                0x00,
-            ],
-        );
+        // let sync_ep = alt.endpoint_interrupt_in(3, 1);
+        // alt.descriptor(
+        //     ACSFT::CS_ENDPOINT as u8,
+        //     &[
+        //         TerminalDescriptorSubType::HEADER as u8,
+        //         0x00,
+        //         0x00,
+        //         0x00,
+        //         0x00,
+        //     ],
+        // );
 
         drop(cfg_desc);
 
@@ -314,7 +314,7 @@ impl<'d, D: Driver<'d>> AudioClass<'d, D> {
 
         AudioClass {
             read_ep: samples_ep,
-            write_ep: sync_ep,
+            //write_ep: sync_ep,
         }
     }
 
@@ -325,9 +325,9 @@ impl<'d, D: Driver<'d>> AudioClass<'d, D> {
     }
 
     // // /// Writes a single packet into the IN endpoint.
-    pub async fn write_packet(&mut self, data: &[u8]) -> Result<(), EndpointError> {
-        self.write_ep.write(data).await
-    }
+    // pub async fn write_packet(&mut self, data: &[u8]) -> Result<(), EndpointError> {
+    //     self.write_ep.write(data).await
+    // }
 
     /// Reads a single packet from the OUT endpoint.
     pub async fn read_packet(&mut self, data: &mut [u8]) -> Result<usize, EndpointError> {
@@ -342,16 +342,16 @@ impl<'d, D: Driver<'d>> AudioClass<'d, D> {
     // /// Split the class into a sender and receiver.
     // ///
     // /// This allows concurrently sending and receiving packets from separate tasks.
-    pub fn split(self) -> (Sender<'d, D>, Receiver<'d, D>) {
-        (
-            Sender {
-                write_ep: self.write_ep,
-            },
-            Receiver {
-                read_ep: self.read_ep,
-            },
-        )
-    }
+    // pub fn split(self) -> (Sender<'d, D>, Receiver<'d, D>) {
+    //     (
+    //         Sender {
+    //             write_ep: self.write_ep,
+    //         },
+    //         Receiver {
+    //             read_ep: self.read_ep,
+    //         },
+    //     )
+    // }
 }
 
 /// Midi class packet sender.
