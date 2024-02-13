@@ -12,9 +12,11 @@ use cortex_m::peripheral::NVIC;
 use defmt::{error, info, println, unwrap};
 use embassy_executor::Spawner;
 use embassy_futures::select::{select, Either};
-use embassy_nrf::config::Config;
-use embassy_nrf::gpio::Output;
-use embassy_nrf::pac::USBD;
+use embassy_rp::config::Config;
+use embassy_rp::gpio::Output;
+// use embassy_nrf::config::Config;
+// use embassy_nrf::gpio::Output;
+// use embassy_nrf::pac::USBD;
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_sync::channel::{self, Channel, Sender};
 use embassy_sync::mutex::Mutex;
@@ -29,13 +31,12 @@ use embassy_usb::Builder;
 
 // mod i2s_process;
 
-use embassy_nrf::usb::vbus_detect::{HardwareVbusDetect, VbusDetect};
-use embassy_nrf::usb::{Driver, Instance};
-use embassy_nrf::{bind_interrupts, pac, peripherals, usb};
+use embassy_rp::peripherals::USB;
+use embassy_rp::usb::{Driver, Instance, InterruptHandler};
+use embassy_rp::{bind_interrupts, peripherals};
 
 bind_interrupts!(struct Irqs {
-    USBD => usb::InterruptHandler<peripherals::USBD>;
-    POWER_CLOCK => usb::vbus_detect::InterruptHandler;
+    USBCTRL_IRQ => InterruptHandler<USB>;
 });
 
 use static_cell::StaticCell;
@@ -74,7 +75,7 @@ impl SampleBuffer {
     }
 }
 
-type Usb = Driver<'static, peripherals::USBD, HardwareVbusDetect>;
+type Usb = Driver<'static, peripherals::USB>;
 
 #[embassy_executor::task]
 async fn usb_runner(mut usb: embassy_usb::UsbDevice<'static, Usb>) {
@@ -170,27 +171,23 @@ async fn usb_samples_task(
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
-    let p = embassy_nrf::init(Config::default());
-    let clock: pac::CLOCK = unsafe { mem::transmute(()) };
+    println!("init");
+    let p = embassy_rp::init(Config::default());
 
-    info!("Enabling ext hfosc...");
-    clock.tasks_hfclkstart.write(|w| unsafe { w.bits(1) });
-    while clock.events_hfclkstarted.read().bits() != 1 {}
+    let mut led_status = Output::new(p.PIN_21, embassy_rp::gpio::Level::Low);
 
-    let mut led_status = Output::new(
-        p.P1_11,
-        embassy_nrf::gpio::Level::High,
-        embassy_nrf::gpio::OutputDrive::Standard,
-    );
+    let mut cnt = 0_u8;
 
-    let status_pin = Output::new(
-        p.P1_10,
-        embassy_nrf::gpio::Level::High,
-        embassy_nrf::gpio::OutputDrive::Standard,
-    );
+    // loop {
+    //     led_status.toggle();
+    //     println!("loop {:02}", cnt);
+    //     Timer::after_millis(1000).await;
+    //     cnt += 1;
+    // }
 
+    let status_pin = Output::new(p.PIN_22, embassy_rp::gpio::Level::Low);
     // Create the driver, from the HAL.
-    let driver = Driver::new(p.USBD, Irqs, HardwareVbusDetect::new(Irqs));
+    let driver = Driver::new(p.USB, Irqs);
 
     // Create embassy-usb Config
     let mut config = embassy_usb::Config::new(0xc0de, 0xcafe);
@@ -236,8 +233,8 @@ async fn main(spawner: Spawner) {
 
     loop {
         led_status.toggle();
-        println!("loop {:02}", cnt);
+        println!("loop {:02x}", cnt);
         Timer::after_millis(1000).await;
-        cnt += 1;
+        cnt = cnt.wrapping_add(1);
     }
 }
