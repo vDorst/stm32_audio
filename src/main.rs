@@ -28,14 +28,20 @@ use {defmt_rtt as _, panic_probe as _};
 
 use embassy_usb::driver::EndpointError;
 use embassy_usb::Builder;
+use fixed::traits::ToFixed;
 
 // mod i2s_process;
 
-use embassy_rp::peripherals::USB;
+use embassy_rp::peripherals::{DMA_CH0, PIO0, USB};
+use embassy_rp::pio::{
+    Config as PIOConfig, FifoJoin, InterruptHandler as PioInterruptHandler, Pio, ShiftConfig,
+    ShiftDirection,
+};
 use embassy_rp::usb::{Driver, Instance, InterruptHandler};
-use embassy_rp::{bind_interrupts, peripherals};
+use embassy_rp::{bind_interrupts, peripherals, Peripheral as _, PeripheralRef};
 
 bind_interrupts!(struct Irqs {
+    PIO0_IRQ_0 => PioInterruptHandler<PIO0>;
     USBCTRL_IRQ => InterruptHandler<USB>;
 });
 
@@ -52,22 +58,12 @@ mod usb_audio_class;
 //     0x8000, 0x8119, 0x845d, 0x89bf, 0x9127, 0x9a74, 0xa57e, 0xb215, 0xc001, 0xcf05, 0xdee0, 0xef4b,
 // ];
 
-// #[embassy_executor::task]
-// async fn i2s_runner(
-//     mut i2s: I2cPlayer<NoopRawMutex, peripherals::SPI3, NoDma, NoDma, peripherals::DMA1_CH7>,
-// ) {
-//     loop {
-//         info!("init i2c runner");
-//         i2s.run().await;
-//     }
-// }
-
 #[repr(align(8))]
-struct SampleBuffer(pub [u16; 100]);
+struct SampleBuffer(pub [u32; 50]);
 
 impl SampleBuffer {
     pub fn new() -> Self {
-        Self([0; 100])
+        Self([0; 50])
     }
 
     pub fn as_mut_ptr(&mut self) -> &mut [u8] {
@@ -107,11 +103,16 @@ enum I2SStatus {
     Running,
 }
 
+const BUFFER_SIZE: usize = 48;
+static DMA_BUFFER: StaticCell<[u32; BUFFER_SIZE * 2]> = StaticCell::new();
+
 #[embassy_executor::task]
 async fn usb_samples_task(
     mut uac: AudioClass<'static, Usb>,
     //samples: Sender<'static, NoopRawMutex, TSamples, 10>,
     // mut i2s: I2S<'static, peripherals::SPI3, peripherals::DMA1_CH7, u16>,
+    mut pio: Pio<'static, PIO0>,
+    mut dma_ref: PeripheralRef<'static, DMA_CH0>,
     mut status_pin: Output<'static>,
 ) {
     let mut status;
@@ -120,6 +121,13 @@ async fn usb_samples_task(
     let mut total = 0;
     // let (mut tx, mut rx) = uac.split();
 
+    let dma_buffer = DMA_BUFFER.init_with(|| [0u32; BUFFER_SIZE * 2]);
+    let (mut back_buffer, mut front_buffer) = dma_buffer.split_at_mut(BUFFER_SIZE);
+
+    // start pio state machine
+    pio.sm0.set_enable(true);
+    let tx = pio.sm0.tx();
+
     loop {
         info!("Wait for USB Audio samples");
         status = I2SStatus::Waiting;
@@ -127,15 +135,21 @@ async fn usb_samples_task(
         // i2s.stop();
         // uac.write_packet(&[0x01, 0x2, 0x0]).await;
         uac.wait_connection().await;
-        // i2s.start();
+
         loop {
+            // i2s.start();
+            let dma_future = tx.dma_push(dma_ref.reborrow(), front_buffer);
             match uac.read_packet(packet_buf.as_mut_ptr()).await {
                 Ok(n) => {
                     status_pin.toggle();
                     total += n;
-                    let buf_orig = &packet_buf.0[0..n / 2];
+                    let buf_orig = &packet_buf.0[0..n / 4];
                     cnt -= 1;
                     let mut rem = 0;
+
+                    for (s, sample) in back_buffer.iter_mut().zip(buf_orig) {
+                        *s = *sample;
+                    }
                     //rem = i2s.write(buf_orig).await;
                     if cnt == 0 {
                         info!(
@@ -159,6 +173,11 @@ async fn usb_samples_task(
                     //     }
                     //     I2SStatus::Running => (),
                     // }
+
+                    // now await the dma future. once the dma finishes, the next buffer needs to be queued
+                    // within DMA_DEPTH / SAMPLE_RATE = 8 / 48000 seconds = 166us
+                    dma_future.await;
+                    core::mem::swap(&mut back_buffer, &mut front_buffer);
                 }
                 Err(e) => {
                     error!("Read: {:?}", e);
@@ -168,6 +187,8 @@ async fn usb_samples_task(
         }
     }
 }
+
+const SAMPLE_RATE: u32 = 48_000;
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
@@ -185,7 +206,60 @@ async fn main(spawner: Spawner) {
     //     cnt += 1;
     // }
 
+    // Setup pio state machine for i2s output
+    let mut pio = Pio::new(p.PIO0, Irqs);
+
+    #[rustfmt::skip]
+     let pio_program = pio_proc::pio_asm!(
+         ".side_set 2",
+         "    set x, 14          side 0b01", // side 0bWB - W = Word Clock, B = Bit Clock
+         "left_data:",
+         "    out pins, 1        side 0b00",
+         "    jmp x-- left_data  side 0b01",
+         "    out pins 1         side 0b10",
+         "    set x, 14          side 0b11",
+         "right_data:",
+         "    out pins 1         side 0b10",
+         "    jmp x-- right_data side 0b11",
+         "    out pins 1         side 0b00",
+     );
+
+    let bit_clock_pin = p.PIN_18;
+    let left_right_clock_pin = p.PIN_19;
+    let data_pin = p.PIN_20;
+
+    let data_pin = pio.common.make_pio_pin(data_pin);
+    let bit_clock_pin = pio.common.make_pio_pin(bit_clock_pin);
+    let left_right_clock_pin = pio.common.make_pio_pin(left_right_clock_pin);
+
     let status_pin = Output::new(p.PIN_22, embassy_rp::gpio::Level::Low);
+
+    let cfg = {
+        let mut cfg = PIOConfig::default();
+        cfg.use_program(
+            &pio.common.load_program(&pio_program.program),
+            &[&bit_clock_pin, &left_right_clock_pin],
+        );
+        cfg.set_out_pins(&[&data_pin]);
+        const BIT_DEPTH: u32 = 16;
+        const CHANNELS: u32 = 2;
+        let clock_frequency = SAMPLE_RATE * BIT_DEPTH * CHANNELS;
+        cfg.clock_divider = (125_000_000. / f64::from(clock_frequency) / 2.).to_fixed();
+        cfg.shift_out = ShiftConfig {
+            threshold: 32,
+            direction: ShiftDirection::Left,
+            auto_fill: true,
+        };
+        // join fifos to have twice the time to start the next dma transfer
+        cfg.fifo_join = FifoJoin::TxOnly;
+        cfg
+    };
+    pio.sm0.set_config(&cfg);
+    pio.sm0.set_pin_dirs(
+        embassy_rp::pio::Direction::Out,
+        &[&data_pin, &left_right_clock_pin, &bit_clock_pin],
+    );
+
     // Create the driver, from the HAL.
     let driver = Driver::new(p.USB, Irqs);
 
@@ -225,9 +299,11 @@ async fn main(spawner: Spawner) {
 
     Timer::after(Duration::from_millis(10)).await;
 
+    let dma_ref = p.DMA_CH0.into_ref();
+
     // unwrap!(spawner.spawn(usb_samples_task(class, sample_chan.sender())));
     //unwrap!(spawner.spawn(usb_samples_task(class, i2s, status_pin)));
-    unwrap!(spawner.spawn(usb_samples_task(class, status_pin)));
+    unwrap!(spawner.spawn(usb_samples_task(class, pio, dma_ref, status_pin)));
 
     let mut cnt: u8 = 0;
 
