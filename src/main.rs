@@ -12,8 +12,8 @@ use cortex_m::peripheral::NVIC;
 use defmt::{error, info, println, unwrap};
 use embassy_executor::Spawner;
 use embassy_futures::select::{select, Either};
-use embassy_rp::config::Config;
-use embassy_rp::gpio::Output;
+// use embassy_rp::config::Config;
+// use embassy_rp::gpio::Output;
 // use embassy_nrf::config::Config;
 // use embassy_nrf::gpio::Output;
 // use embassy_nrf::pac::USBD;
@@ -32,13 +32,25 @@ use fixed::traits::ToFixed;
 
 // mod i2s_process;
 
-use embassy_rp::peripherals::{DMA_CH0, PIO0, USB};
-use embassy_rp::pio::{
-    Config as PIOConfig, FifoJoin, InterruptHandler as PioInterruptHandler, Pio, ShiftConfig,
-    ShiftDirection,
+// use embassy_rp::peripherals::{DMA_CH0, PIO0, USB};
+// use embassy_rp::pio::{
+//     Config as PIOConfig, FifoJoin, InterruptHandler as PioInterruptHandler, Pio, ShiftConfig,
+//     ShiftDirection,
+// };
+// use embassy_rp::usb::{Driver, Instance, InterruptHandler};
+// use embassy_rp::{bind_interrupts, peripherals, Peripheral as _, PeripheralRef};
+
+use esp_hal as esp32c6_hal;
+
+use esp32c6_hal::{
+    clock::ClockControl,
+    dma::{Dma, DmaPriority},
+    dma_buffers, embassy,
+    i2s::{asynch::*, DataFormat, I2s, Standard},
+    peripherals::Peripherals,
+    prelude::*,
+    IO,
 };
-use embassy_rp::usb::{Driver, Instance, InterruptHandler};
-use embassy_rp::{bind_interrupts, peripherals, Peripheral as _, PeripheralRef};
 
 bind_interrupts!(struct Irqs {
     PIO0_IRQ_0 => PioInterruptHandler<PIO0>;
@@ -71,7 +83,7 @@ impl SampleBuffer {
     }
 }
 
-type Usb = Driver<'static, peripherals::USB>;
+type Usb = Driver<'static, peripherals::USB_DEVICE>;
 
 #[embassy_executor::task]
 async fn usb_runner(mut usb: embassy_usb::UsbDevice<'static, Usb>) {
@@ -111,8 +123,8 @@ async fn usb_samples_task(
     mut uac: AudioClass<'static, Usb>,
     //samples: Sender<'static, NoopRawMutex, TSamples, 10>,
     // mut i2s: I2S<'static, peripherals::SPI3, peripherals::DMA1_CH7, u16>,
-    mut pio: Pio<'static, PIO0>,
-    mut dma_ref: PeripheralRef<'static, DMA_CH0>,
+    // mut pio: Pio<'static, PIO0>,
+    // mut dma_ref: PeripheralRef<'static, DMA_CH0>,
     mut status_pin: Output<'static>,
 ) {
     let mut status;
@@ -121,12 +133,12 @@ async fn usb_samples_task(
     let mut total = 0;
     // let (mut tx, mut rx) = uac.split();
 
-    let dma_buffer = DMA_BUFFER.init_with(|| [0u32; BUFFER_SIZE * 2]);
-    let (mut back_buffer, mut front_buffer) = dma_buffer.split_at_mut(BUFFER_SIZE);
+    // let dma_buffer = DMA_BUFFER.init_with(|| [0u32; BUFFER_SIZE * 2]);
+    // let (mut back_buffer, mut front_buffer) = dma_buffer.split_at_mut(BUFFER_SIZE);
 
     // start pio state machine
-    pio.sm0.set_enable(true);
-    let tx = pio.sm0.tx();
+    // pio.sm0.set_enable(true);
+    // let tx = pio.sm0.tx();
 
     loop {
         info!("Wait for USB Audio samples");
@@ -176,8 +188,8 @@ async fn usb_samples_task(
 
                     // now await the dma future. once the dma finishes, the next buffer needs to be queued
                     // within DMA_DEPTH / SAMPLE_RATE = 8 / 48000 seconds = 166us
-                    dma_future.await;
-                    core::mem::swap(&mut back_buffer, &mut front_buffer);
+                    // dma_future.await;
+                    // core::mem::swap(&mut back_buffer, &mut front_buffer);
                 }
                 Err(e) => {
                     error!("Read: {:?}", e);
@@ -189,79 +201,28 @@ async fn usb_samples_task(
 }
 
 const SAMPLE_RATE: u32 = 48_000;
+const BIT_DEPTH: u32 = 16;
+const CHANNELS: u32 = 2;
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
     println!("init");
-    let p = embassy_rp::init(Config::default());
 
-    let mut led_status = Output::new(p.PIN_21, embassy_rp::gpio::Level::Low);
+    let p = Peripherals::take();
+    let system = p.SYSTEM.split();
+    let clocks = ClockControl::boot_defaults(system.clock_control).freeze();
 
-    let mut cnt = 0_u8;
-
-    // loop {
-    //     led_status.toggle();
-    //     println!("loop {:02}", cnt);
-    //     Timer::after_millis(1000).await;
-    //     cnt += 1;
-    // }
-
-    // Setup pio state machine for i2s output
-    let mut pio = Pio::new(p.PIO0, Irqs);
-
-    #[rustfmt::skip]
-     let pio_program = pio_proc::pio_asm!(
-         ".side_set 2",
-         "    set x, 14          side 0b01", // side 0bWB - W = Word Clock, B = Bit Clock
-         "left_data:",
-         "    out pins, 1        side 0b00",
-         "    jmp x-- left_data  side 0b01",
-         "    out pins 1         side 0b10",
-         "    set x, 14          side 0b11",
-         "right_data:",
-         "    out pins 1         side 0b10",
-         "    jmp x-- right_data side 0b11",
-         "    out pins 1         side 0b00",
-     );
-
-    let bit_clock_pin = p.PIN_18;
-    let left_right_clock_pin = p.PIN_19;
-    let data_pin = p.PIN_20;
-
-    let data_pin = pio.common.make_pio_pin(data_pin);
-    let bit_clock_pin = pio.common.make_pio_pin(bit_clock_pin);
-    let left_right_clock_pin = pio.common.make_pio_pin(left_right_clock_pin);
-
-    let status_pin = Output::new(p.PIN_22, embassy_rp::gpio::Level::Low);
-
-    let cfg = {
-        let mut cfg = PIOConfig::default();
-        cfg.use_program(
-            &pio.common.load_program(&pio_program.program),
-            &[&bit_clock_pin, &left_right_clock_pin],
-        );
-        cfg.set_out_pins(&[&data_pin]);
-        const BIT_DEPTH: u32 = 16;
-        const CHANNELS: u32 = 2;
-        let clock_frequency = SAMPLE_RATE * BIT_DEPTH * CHANNELS;
-        cfg.clock_divider = (125_000_000. / f64::from(clock_frequency) / 2.).to_fixed();
-        cfg.shift_out = ShiftConfig {
-            threshold: 32,
-            direction: ShiftDirection::Left,
-            auto_fill: true,
-        };
-        // join fifos to have twice the time to start the next dma transfer
-        cfg.fifo_join = FifoJoin::TxOnly;
-        cfg
-    };
-    pio.sm0.set_config(&cfg);
-    pio.sm0.set_pin_dirs(
-        embassy_rp::pio::Direction::Out,
-        &[&data_pin, &left_right_clock_pin, &bit_clock_pin],
+    embassy::init(
+        &clocks,
+        esp32c6_hal::timer::TimerGroup::new(p.TIMG0, &clocks),
     );
 
+    let io = IO::new(p.GPIO, p.IO_MUX);
+
+    let status_pin = Output::new(io.pins.gpio15, embassy_rp::gpio::Level::Low);
+
     // Create the driver, from the HAL.
-    let driver = Driver::new(p.USB, Irqs);
+    let driver = Driver::new(p.USB_DEVICE, Irqs);
 
     // Create embassy-usb Config
     let mut config = embassy_usb::Config::new(0xc0de, 0xcafe);
@@ -299,11 +260,9 @@ async fn main(spawner: Spawner) {
 
     Timer::after(Duration::from_millis(10)).await;
 
-    let dma_ref = p.DMA_CH0.into_ref();
-
     // unwrap!(spawner.spawn(usb_samples_task(class, sample_chan.sender())));
     //unwrap!(spawner.spawn(usb_samples_task(class, i2s, status_pin)));
-    unwrap!(spawner.spawn(usb_samples_task(class, pio, dma_ref, status_pin)));
+    unwrap!(spawner.spawn(usb_samples_task(class, status_pin)));
 
     let mut cnt: u8 = 0;
 

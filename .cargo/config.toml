@@ -18,9 +18,18 @@ rustflags = [
   "-C", "link-arg=--nmagic",
 ]
 
+[target.riscv32imac-unknown-none-elf]
+runner = "espflash flash --monitor"
+rustflags = [
+  "-C", "link-arg=-Tlinkall.x",
+  "-C", "force-frame-pointers",
+]
 
 [build]
-target = "thumbv6m-none-eabi"
+target = "riscv32imac-unknown-none-elf"
+
+# [build]
+# target = "thumbv6m-none-eabi"
 
 [env]
 DEFMT_LOG = "info"
