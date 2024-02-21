@@ -273,7 +273,12 @@ impl<'d, D: Driver<'d>> AudioClass<'d, D> {
         );
 
         // Standard AS Isochronous Audio Data Endpoint Descriptor
-        let samples_ep = alt.endpoint_isochronous_out(max_packet_size, 1);
+        let samples_ep = alt.endpoint_isochronous_out(
+            max_packet_size,
+            1,
+            embassy_usb::driver::IsochronousSynchronizationType::Synchronous,
+            embassy_usb::driver::IsochronousUsageType::Data,
+        );
 
         //Audio Streaming Class Specific Audio Data Endpoint Descriptor
         alt.descriptor(

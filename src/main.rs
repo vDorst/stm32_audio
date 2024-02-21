@@ -145,8 +145,8 @@ async fn usb_samples_task(
                         total += n;
                         let buf_orig = &packet_buf.0[0..n / 2];
                         cnt -= 1;
-                        let mut rem = 0;
-                        //rem = i2s.write(buf_orig).await;
+                        let mut rem = Ok(0);
+                        rem = i2s.write(buf_orig).await;
                         if cnt == 0 {
                             info!(
                                 "GOT: {} BL {} S {} T {} R {}",
