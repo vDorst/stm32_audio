@@ -1,4 +1,6 @@
+use core::cell::Cell;
 use core::ops::DerefMut;
+use core::sync::atomic::AtomicU32;
 
 use defmt::println;
 use embassy_stm32::pac::timer::vals::{CcmrInputCcs, Dir, FilterValue};
@@ -9,8 +11,11 @@ use embassy_stm32::rcc::low_level::RccPeripheral;
 use embassy_stm32::timer::low_level::{GeneralPurpose16bitInstance, GeneralPurpose32bitInstance};
 use embassy_stm32::timer::{CaptureCompare32bitInstance, Channel, InputTISelection};
 use embassy_stm32::{interrupt, PeripheralRef, Peripherals};
+use static_cell::StaticCell;
 
 pub struct CCTIM2(pub PeripheralRef<'static, TIM2>);
+
+pub static SOF: AtomicU32 = AtomicU32::new(0);
 
 #[allow(non_camel_case_types, dead_code)]
 #[repr(u32)]
@@ -96,9 +101,11 @@ impl CCTIM2 {
 
 #[interrupt]
 unsafe fn TIM2() {
-    static mut CNT: usize = 999;
+    static mut VALUES: [u32; 4] = [48000_u32; 4];
+    static mut IDX: usize = 0;
     static mut LAST: u32 = 0;
-    static mut DIFF: u32 = 0;
+
+    static mut CNT: usize = 0;
 
     // println!("TIM2_INT");
 
@@ -107,15 +114,24 @@ unsafe fn TIM2() {
     if tmr2.sr().read().ccif(0) {
         let old = *LAST;
         *LAST = tmr2.ccr(0).read().ccr();
-        *DIFF = (*LAST).wrapping_sub(old);
 
+        let diff = (*LAST).wrapping_sub(old);
+        VALUES[*IDX] = diff;
+        *IDX = (*IDX + 1) & 0x3;
+
+        let avg: u32 = VALUES.iter().sum();
+        let fb = (avg * 256 / 1000) << 6;
+
+        if *CNT >= 1000 {
+            *CNT = 0;
+            println!(
+                "SOF: C {}: A {} {2=14..24} + {2=0..14}/16384",
+                diff, avg, fb
+            );
+        }
         *CNT += 1;
 
-        if *CNT == 1000 {
-            *CNT = 0;
-
-            println!("CC: {}", DIFF);
-        }
+        SOF.store(fb, core::sync::atomic::Ordering::Relaxed);
         // tmr2.sr().write(|w| w.set_ccif(0, true));
     }
 }

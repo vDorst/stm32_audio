@@ -224,7 +224,7 @@ impl<'d, D: Driver<'d>> AudioClass<'d, D> {
         let audio_if = iface1.interface_number();
 
         // Class-specific Descriptors (Header)
-        let mut if1_alt = iface1.alt_setting(
+        let mut if1_alt0 = iface1.alt_setting(
             USB_AUDIO_CLASS,
             USB_AUDIOSTREAMING_SUBCLASS,
             PROTOCOL_NONE,
@@ -232,7 +232,7 @@ impl<'d, D: Driver<'d>> AudioClass<'d, D> {
         );
 
         // Class-specific Descriptors (Header)
-        let mut alt = iface1.alt_setting(
+        let mut if1_alt1 = iface1.alt_setting(
             USB_AUDIO_CLASS,
             USB_AUDIOSTREAMING_SUBCLASS,
             PROTOCOL_NONE,
@@ -241,7 +241,7 @@ impl<'d, D: Driver<'d>> AudioClass<'d, D> {
 
         //Audio Streaming Class Specific Interface Descriptor
         // AS Interface Descriptor
-        alt.descriptor(
+        if1_alt1.descriptor(
             ACSFT::CS_INTERFACE as u8,
             &[
                 // bDescriptorSubtype
@@ -255,7 +255,7 @@ impl<'d, D: Driver<'d>> AudioClass<'d, D> {
         //Audio Streaming Format Type Descriptor
         // Type I Format Type Descriptor
         // AS Interface Descriptor
-        alt.descriptor(
+        if1_alt1.descriptor(
             ACSFT::CS_INTERFACE as u8,
             &[
                 // bDescriptorSubtype
@@ -273,23 +273,30 @@ impl<'d, D: Driver<'d>> AudioClass<'d, D> {
         );
 
         // Standard AS Isochronous Audio Data Endpoint Descriptor
-        let samples_ep = alt.endpoint_isochronous_out(
+        let samples_ep = if1_alt1.endpoint_isochronous_out(
             max_packet_size,
             1,
-            embassy_usb::driver::IsochronousSynchronizationType::Synchronous,
+            embassy_usb::driver::IsochronousSynchronizationType::Asynchronous,
             embassy_usb::driver::IsochronousUsageType::Data,
         );
 
         //Audio Streaming Class Specific Audio Data Endpoint Descriptor
-        alt.descriptor(
+        if1_alt1.descriptor(
             ACSFT::CS_ENDPOINT as u8,
             &[
                 TerminalDescriptorSubType::HEADER as u8,
                 0x01, // Sampling Freq. MaxPackets ONly
-                0x02,
-                0x04,
+                0x00,
+                0x00,
                 0x00,
             ],
+        );
+
+        let sync_ep = if1_alt1.endpoint_isochronous_in(
+            3,
+            1,
+            embassy_usb::driver::IsochronousSynchronizationType::NoSynchronization,
+            embassy_usb::driver::IsochronousUsageType::Feedback,
         );
 
         // Standard AS Isochronous Audio Data Endpoint Descriptor
@@ -297,17 +304,7 @@ impl<'d, D: Driver<'d>> AudioClass<'d, D> {
 
         //Standard AS Isochronous Synch Endpoint Descriptor
 
-        let sync_ep = alt.endpoint_interrupt_in(3, 1);
-        alt.descriptor(
-            ACSFT::CS_ENDPOINT as u8,
-            &[
-                TerminalDescriptorSubType::HEADER as u8,
-                0x00,
-                0x00,
-                0x00,
-                0x00,
-            ],
-        );
+        defmt::println!("FEEDBACK_EP {:02x}", sync_ep.info().addr);
 
         drop(cfg_desc);
 

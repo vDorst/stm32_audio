@@ -133,9 +133,11 @@ async fn usb_samples_task(
         rx.wait_connection().await;
         i2s.start();
         loop {
+            let ret = timer2::SOF.load(core::sync::atomic::Ordering::Relaxed);
+            let ret = ret.to_be_bytes();
             match select(
                 rx.read_packet(packet_buf.as_mut_ptr()),
-                tx.write_packet(&[0x01, 0x2, 0x0]),
+                tx.write_packet(&ret[0..3]),
             )
             .await
             {
@@ -145,18 +147,17 @@ async fn usb_samples_task(
                         total += n;
                         let buf_orig = &packet_buf.0[0..n / 2];
                         cnt -= 1;
-                        let mut rem = Ok(0);
-                        rem = i2s.write(buf_orig).await;
-                        if cnt == 0 {
+                        let remain = i2s.write(buf_orig).await;
+                        if n != 192 {
                             info!(
                                 "GOT: {} BL {} S {} T {} R {}",
                                 n,
                                 buf_orig.len(),
                                 status,
                                 total,
-                                rem
+                                remain
                             );
-                            cnt = 1000;
+                            // cnt = 1000;
                             total = 0;
                         }
                         // match &mut status {
@@ -175,7 +176,11 @@ async fn usb_samples_task(
                         break;
                     }
                 },
-                Either::Second(ret) => {}
+                Either::Second(ret) => {
+                    if let Err(e) = ret {
+                        error!("Write: {:?}", e);
+                    }
+                }
             }
         }
     }
@@ -196,9 +201,9 @@ async fn main(spawner: Spawner) {
         config.rcc.pll_src = PllSource::HSE;
         config.rcc.pll = Some(Pll {
             prediv: PllPreDiv::DIV25,
-            mul: PllMul::MUL336,
+            mul: PllMul::MUL192,
             divp: Some(PllPDiv::DIV4), // 25mhz / 25 * 336 / 4 = 84Mhz.
-            divq: Some(PllQDiv::DIV7), // 25mhz / 25 * 336 / 7 = 48Mhz.
+            divq: Some(PllQDiv::DIV4), // 25mhz / 25 * 336 / 7 = 48Mhz.
             divr: None,
         });
 
@@ -282,27 +287,27 @@ async fn main(spawner: Spawner) {
 
     i2s.start();
 
-    info!("write I2S");
-    for _ in 0u32..1000 {
-        let mut buf: Vec<u16, 96> = Vec::new();
-        for _ in 0..write.capacity() {
-            buf.push(sm.next().copied().unwrap()).unwrap();
-        }
+    // info!("write I2S");
+    // for _ in 0u32..1000 {
+    //     let mut buf: Vec<u16, 96> = Vec::new();
+    //     for _ in 0..write.capacity() {
+    //         buf.push(sm.next().copied().unwrap()).unwrap();
+    //     }
 
-        // unwrap!(i2s.writer(&buf));
+    //     // unwrap!(i2s.writer(&buf));
 
-        // match select(sample_chan.send(buf), Timer::after_millis(1000)).await {
-        match select(i2s.write(&buf), Timer::after_millis(1000)).await {
-            Either::First(e) => {
-                unwrap!(e);
-            }
-            Either::Second(()) => {
-                println!("Timer");
-            }
-        };
-    }
+    //     // match select(sample_chan.send(buf), Timer::after_millis(1000)).await {
+    //     match select(i2s.write(&buf), Timer::after_millis(1000)).await {
+    //         Either::First(e) => {
+    //             unwrap!(e);
+    //         }
+    //         Either::Second(()) => {
+    //             println!("Timer");
+    //         }
+    //     };
+    // }
 
-    info!("write I2S Done");
+    // info!("write I2S Done");
 
     let mut buf: Vec<u16, 96> = Vec::new();
     for _ in 0..write.capacity() {
