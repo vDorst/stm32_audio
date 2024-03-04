@@ -120,7 +120,9 @@ unsafe fn TIM2() {
         *IDX = (*IDX + 1) & 0x3;
 
         let avg: u32 = VALUES.iter().sum();
-        let fb = (avg * 256 / 1000) << 6;
+        let mul = avg.checked_mul(256).unwrap_or(48000_u32 * 4);
+
+        let fb = (mul / 1000) << 6;
 
         if *CNT >= 1000 {
             *CNT = 0;

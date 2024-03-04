@@ -121,6 +121,7 @@ async fn usb_samples_task(
     let mut status;
     let mut packet_buf = SampleBuffer::new();
     let mut cnt = 1;
+    let mut fb_cnt = 0;
     let mut total = 0;
     let (mut tx, mut rx) = uac.split();
 
@@ -134,7 +135,8 @@ async fn usb_samples_task(
         i2s.start();
         loop {
             let ret = timer2::SOF.load(core::sync::atomic::Ordering::Relaxed);
-            let ret = ret.to_be_bytes();
+            let ret = ret.to_le_bytes();
+            cnt += 1;
             match select(
                 rx.read_packet(packet_buf.as_mut_ptr()),
                 tx.write_packet(&ret[0..3]),
@@ -146,7 +148,6 @@ async fn usb_samples_task(
                         status_pin.toggle();
                         total += n;
                         let buf_orig = &packet_buf.0[0..n / 2];
-                        cnt -= 1;
                         let remain = i2s.write(buf_orig).await;
                         if n != 192 {
                             info!(
@@ -177,10 +178,23 @@ async fn usb_samples_task(
                     }
                 },
                 Either::Second(ret) => {
+                    fb_cnt += 1;
                     if let Err(e) = ret {
                         error!("Write: {:?}", e);
                     }
                 }
+            }
+            if cnt == 1000 {
+                println!(
+                    "T: {} F {} ret {:02x} {:02x}",
+                    total,
+                    fb_cnt,
+                    ret[0..3],
+                    ret
+                );
+                cnt = 0;
+                total = 0;
+                fb_cnt = 0;
             }
         }
     }
