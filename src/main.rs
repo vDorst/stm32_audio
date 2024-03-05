@@ -6,6 +6,7 @@
 // use crate::i2s_process::{I2cPlayer, TSamples};
 use core::borrow::BorrowMut;
 use core::fmt::Write;
+use core::num::NonZeroU8;
 use core::ptr::slice_from_raw_parts;
 use cortex_m::peripheral::NVIC;
 use defmt::{error, info, println, unwrap};
@@ -49,31 +50,14 @@ use usb_audio_class::{AudioClass, State};
 mod audio;
 mod usb_audio_class;
 
-const SAMPLES_1K_HZ: [u16; 48] = [
-    0x0000, 0x10b5, 0x2120, 0x30fb, 0x4000, 0x4deb, 0x5a82, 0x658c, 0x6ed9, 0x7641, 0x7ba3, 0x7ee7,
-    0x7fff, 0x7ee7, 0x7ba3, 0x7641, 0x6ed9, 0x658c, 0x5a82, 0x4deb, 0x3fff, 0x30fb, 0x2120, 0x10b5,
-    0x0000, 0xef4b, 0xdee0, 0xcf05, 0xc000, 0xb215, 0xa57e, 0x9a74, 0x9127, 0x89bf, 0x845d, 0x8119,
-    0x8000, 0x8119, 0x845d, 0x89bf, 0x9127, 0x9a74, 0xa57e, 0xb215, 0xc001, 0xcf05, 0xdee0, 0xef4b,
-];
-
 mod timer2;
 
-// #[embassy_executor::task]
-// async fn i2s_runner(
-//     mut i2s: I2cPlayer<NoopRawMutex, peripherals::SPI3, NoDma, NoDma, peripherals::DMA1_CH7>,
-// ) {
-//     loop {
-//         info!("init i2c runner");
-//         i2s.run().await;
-//     }
-// }
-
 #[repr(align(8))]
-struct SampleBuffer(pub [u16; 100]);
+struct SampleBuffer(pub [u16; 200]);
 
 impl SampleBuffer {
     pub fn new() -> Self {
-        Self([0; 100])
+        Self([0; 200])
     }
 
     pub fn as_mut_ptr(&mut self) -> &mut [u8] {
@@ -95,26 +79,23 @@ static EP_OUT_BUFFER: StaticCell<[u8; 512]> = StaticCell::new();
 static DEVICE_DESC: StaticCell<[u8; 256]> = StaticCell::new();
 static CONFIG_DESC: StaticCell<[u8; 256]> = StaticCell::new();
 static BOS_DESC: StaticCell<[u8; 256]> = StaticCell::new();
-// static MSOS_DESC: StaticCell<[u8; 128]> = StaticCell::new();
 static CONTROL_BUF: StaticCell<[u8; 256]> = StaticCell::new();
 static AUDIO_STATE: StaticCell<State> = StaticCell::new();
-// static SANPLE_BUF: StaticCell<Channel<NoopRawMutex, TSamples, 10>> = StaticCell::new();
 
-const SAMPLES: usize = 48 * 2 * 2 / 2 * 4;
+const SAMPLES: usize = 48 * 2 * 2 / 2 * 8;
 
 static SAMPLE_DMABUF: StaticCell<[u16; SAMPLES]> = StaticCell::new();
 
 #[derive(Debug, defmt::Format)]
 enum I2SStatus {
-    Waiting,
-    Buffering(u8),
+    // Buffering N samples before start the real dma transfer
+    Buffering(NonZeroU8),
     Running,
 }
 
 #[embassy_executor::task]
 async fn usb_samples_task(
     mut uac: AudioClass<'static, Driver<'static, USB_OTG_FS>>,
-    //samples: Sender<'static, NoopRawMutex, TSamples, 10>,
     mut i2s: I2S<'static, peripherals::SPI3, peripherals::DMA1_CH7, u16>,
     mut status_pin: Output<'static>,
 ) {
@@ -127,12 +108,11 @@ async fn usb_samples_task(
 
     loop {
         info!("Wait for USB Audio samples");
-        status = I2SStatus::Waiting;
         status_pin.set_high();
         i2s.stop();
-        // uac.write_packet(&[0x01, 0x2, 0x0]).await;
         rx.wait_connection().await;
-        i2s.start();
+        status = I2SStatus::Buffering(NonZeroU8::new(2).expect("Should fit!"));
+
         loop {
             let ret = timer2::SOF.load(core::sync::atomic::Ordering::Relaxed);
             let ret = ret.to_le_bytes();
@@ -148,7 +128,27 @@ async fn usb_samples_task(
                         status_pin.toggle();
                         total += n;
                         let buf_orig = &packet_buf.0[0..n / 2];
-                        let remain = i2s.write(buf_orig).await;
+                        let remain = match &mut status {
+                            I2SStatus::Running => i2s.write(buf_orig).await,
+                            I2SStatus::Buffering(n) => {
+                                // Write samples to buffer
+                                let ret = i2s.write_immediate(buf_orig);
+                                match NonZeroU8::new(u8::from(*n) - 1) {
+                                    None => {
+                                        status = I2SStatus::Running;
+                                        i2s.start();
+                                        info!("\tStart I2s!\n\n");
+                                    }
+                                    Some(val) => {
+                                        *n = val;
+                                    }
+                                }
+                                ret
+                            }
+                        };
+                        if remain.is_err() {
+                            error!("Sample buffer overrun!");
+                        }
                         if n != 192 {
                             info!(
                                 "GOT: {} BL {} S {} T {} R {}",
@@ -161,19 +161,10 @@ async fn usb_samples_task(
                             // cnt = 1000;
                             total = 0;
                         }
-                        // match &mut status {
-                        //     I2SStatus::Waiting => status = I2SStatus::Buffering(1),
-                        //     I2SStatus::Buffering(n) => {
-                        //         *n -= 1;
-                        //         if *n == 0 {
-                        //             status = I2SStatus::Running;
-                        //         }
-                        //     }
-                        //     I2SStatus::Running => (),
-                        // }
                     }
                     Err(e) => {
-                        error!("Read: {:?}", e);
+                        i2s.stop();
+                        error!("Stop I2s: Read: {:?}", e);
                         break;
                     }
                 },
@@ -184,6 +175,7 @@ async fn usb_samples_task(
                     }
                 }
             }
+
             if cnt == 1000 {
                 println!(
                     "T: {} F {} ret {:02x} {:02x}",
@@ -266,7 +258,7 @@ async fn main(spawner: Spawner) {
     i2s_cfg.standard = Standard::Philips;
     i2s_cfg.function = Function::Transmit;
 
-    let mut i2s = I2S::new_no_mck(
+    let i2s = I2S::new_no_mck(
         p.SPI3,
         p.PB5,      // sd - DAta (Sample Data)
         p.PA15,     // ws - LRCK ( Data L/R )
@@ -283,54 +275,11 @@ async fn main(spawner: Spawner) {
 
     // unwrap!(spawner.spawn(i2s_runner(i2c_play)));
 
-    let mut write: Vec<u16, 96> = Vec::new();
-
     // Enable TIM2 interrupt
     unsafe { NVIC::unmask(pac::interrupt::TIM2) };
     // unsafe { NVIC::unmask(pac::interrupt::DMA1_STREAM5) };
     // unsafe { NVIC::unmask(pac::interrupt::DMA1_STREAM7) };
     // unsafe { NVIC::unmask(pac::interrupt::SPI3) };
-
-    for sample in SAMPLES_1K_HZ {
-        //let sample = sample.wrapping_add(0xEFFF);
-        unwrap!(write.push(sample));
-        unwrap!(write.push(sample));
-    }
-
-    let mut sm = write.iter().cycle();
-
-    i2s.start();
-
-    // info!("write I2S");
-    // for _ in 0u32..1000 {
-    //     let mut buf: Vec<u16, 96> = Vec::new();
-    //     for _ in 0..write.capacity() {
-    //         buf.push(sm.next().copied().unwrap()).unwrap();
-    //     }
-
-    //     // unwrap!(i2s.writer(&buf));
-
-    //     // match select(sample_chan.send(buf), Timer::after_millis(1000)).await {
-    //     match select(i2s.write(&buf), Timer::after_millis(1000)).await {
-    //         Either::First(e) => {
-    //             unwrap!(e);
-    //         }
-    //         Either::Second(()) => {
-    //             println!("Timer");
-    //         }
-    //     };
-    // }
-
-    // info!("write I2S Done");
-
-    let mut buf: Vec<u16, 96> = Vec::new();
-    for _ in 0..write.capacity() {
-        buf.push(0).unwrap();
-    }
-    unwrap!(i2s.write(&buf).await);
-    unwrap!(i2s.write(&buf).await);
-    unwrap!(i2s.write(&buf).await);
-    unwrap!(i2s.write(&buf).await);
 
     let mut config = embassy_stm32::usb_otg::Config::default();
     config.vbus_detection = false;
