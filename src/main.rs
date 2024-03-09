@@ -110,8 +110,9 @@ async fn usb_samples_task(
         info!("Wait for USB Audio samples");
         status_pin.set_high();
         i2s.stop();
+        i2s.clear();
         rx.wait_connection().await;
-        status = I2SStatus::Buffering(NonZeroU8::new(2).expect("Should fit!"));
+        status = I2SStatus::Buffering(NonZeroU8::new(1).expect("Should fit!"));
 
         loop {
             let ret = timer2::SOF.load(core::sync::atomic::Ordering::Relaxed);
@@ -164,7 +165,7 @@ async fn usb_samples_task(
                     }
                     Err(e) => {
                         i2s.stop();
-                        error!("Stop I2s: Read: {:?}", e);
+                        info!("Stop I2s: Read: {:?}", e);
                         break;
                     }
                 },
