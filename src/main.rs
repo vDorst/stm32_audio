@@ -95,8 +95,8 @@ enum I2SStatus {
 
 #[embassy_executor::task]
 async fn usb_samples_task(
-    mut uac: AudioClass<'static, Driver<'static, USB_OTG_FS>>,
-    mut i2s: I2S<'static, peripherals::SPI3, peripherals::DMA1_CH7, u16>,
+    uac: AudioClass<'static, Driver<'static, USB_OTG_FS>>,
+    mut i2s: I2S<'static, peripherals::SPI3, u16>,
     mut status_pin: Output<'static>,
 ) {
     let mut status;
@@ -112,6 +112,7 @@ async fn usb_samples_task(
         i2s.stop();
         i2s.clear();
         rx.wait_connection().await;
+        i2s.start();
         status = I2SStatus::Buffering(NonZeroU8::new(1).expect("Should fit!"));
 
         loop {
@@ -137,7 +138,7 @@ async fn usb_samples_task(
                                 match NonZeroU8::new(u8::from(*n) - 1) {
                                     None => {
                                         status = I2SStatus::Running;
-                                        i2s.start();
+                                        // i2s.start();
                                         info!("\tStart I2s!\n\n");
                                     }
                                     Some(val) => {
@@ -148,7 +149,7 @@ async fn usb_samples_task(
                             }
                         };
                         if remain.is_err() {
-                            error!("Sample buffer overrun!");
+                            // error!("Sample buffer overrun!");
                         }
                         if n != 192 {
                             info!(
@@ -233,7 +234,7 @@ async fn main(spawner: Spawner) {
 
     let p = embassy_stm32::init(config);
 
-    let tmr2 = timer2::CCTIM2::new(p.TIM2.into_ref(), timer2::ITR1_RMP::OTG_FS_SOF);
+    let _tmr2 = timer2::CCTIM2::new(p.TIM2.into_ref(), timer2::ITR1_RMP::OTG_FS_SOF);
 
     let mut led_status = Output::new(
         p.PC14,

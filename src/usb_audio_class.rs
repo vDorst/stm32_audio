@@ -1,5 +1,6 @@
 #![allow(unused)]
 #![allow(clippy::single_match_else)]
+#![allow(non_camel_case_types)]
 //! AUDIO class implementation.
 //! This file is a copy of the `embassy-usb, class, midi`
 

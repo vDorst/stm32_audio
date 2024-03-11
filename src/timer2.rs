@@ -31,7 +31,7 @@ pub enum ITR1_RMP {
 }
 
 impl CCTIM2 {
-    pub fn new(mut timer2: PeripheralRef<'static, TIM2>, inp: ITR1_RMP) -> Self {
+    pub fn new(timer2: PeripheralRef<'static, TIM2>, inp: ITR1_RMP) -> Self {
         let tmr2 = TIM2::regs_gp32();
 
         // Reset timer
@@ -89,13 +89,13 @@ impl CCTIM2 {
     #[allow(dead_code, clippy::unused_self)]
     pub fn get_counter(&self) -> u32 {
         let tmr2 = TIM2::regs_gp32();
-        tmr2.cnt().read().cnt()
+        tmr2.cnt().read()
     }
 
     #[allow(dead_code, clippy::unused_self)]
     pub fn get_cc1(&self) -> u32 {
         let tmr2 = TIM2::regs_gp32();
-        tmr2.ccr(0).read().ccr()
+        tmr2.ccr(0).read()
     }
 }
 
@@ -113,7 +113,7 @@ unsafe fn TIM2() {
 
     if tmr2.sr().read().ccif(0) {
         let old = *LAST;
-        *LAST = tmr2.ccr(0).read().ccr();
+        *LAST = tmr2.ccr(0).read();
 
         let diff = (*LAST).wrapping_sub(old);
         VALUES[*IDX] = diff;
