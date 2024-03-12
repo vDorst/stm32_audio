@@ -107,8 +107,6 @@ unsafe fn TIM2() {
 
     static mut CNT: usize = 0;
 
-    // println!("TIM2_INT");
-
     let tmr2 = TIM2::regs_gp32();
 
     if tmr2.sr().read().ccif(0) {
@@ -122,18 +120,28 @@ unsafe fn TIM2() {
         let avg: u32 = VALUES.iter().sum();
         let mul = avg.checked_mul(256).unwrap_or(48000_u32 * 4);
 
-        let fb = (mul / 1000) << 6;
+        let fb: u32 = (mul / 1000) << 6;
 
         if *CNT >= 1000 {
             *CNT = 0;
+            let val = unsafe { tmr2.as_ptr().byte_add(0x10) }.cast::<u32>();
             println!(
-                "SOF: C {}: A {} {2=14..24} + {2=0..14}/16384",
-                diff, avg, fb
+                "SOF: C {}: A {} {=14..24} + {=0..14}/16384 SR: {:08x}",
+                diff,
+                avg,
+                fb,
+                fb,
+                unsafe { *val },
             );
         }
         *CNT += 1;
 
         SOF.store(fb, core::sync::atomic::Ordering::Relaxed);
-        // tmr2.sr().write(|w| w.set_ccif(0, true));
+    } else {
+        // let int = tmr2.sr().read();
+        let val = unsafe { tmr2.as_ptr().byte_add(0x10) }.cast::<u32>();
+        defmt::error!("IRQ TMR2: SR: 0x{:08x}", val);
     }
+    // We don't need to clear the timer capture interrupt.
+    // It's cleared by hardware by reading the capture register.
 }

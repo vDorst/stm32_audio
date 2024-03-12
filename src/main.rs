@@ -24,6 +24,7 @@ use embassy_stm32::{bind_interrupts, i2c, pac, peripherals, usb_otg, Config, Per
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_sync::channel::{self, Channel, Sender};
 use embassy_sync::mutex::Mutex;
+use embassy_sync::waitqueue::AtomicWaker;
 use embassy_time::{Delay, Duration, Timer};
 use embedded_hal::delay::DelayNs;
 use heapless::{String, Vec};
@@ -45,7 +46,7 @@ use embassy_stm32::i2s::{
     ClockPolarity, Config as I2SConfig, Format, Function, Mode, Standard, I2S,
 };
 use static_cell::StaticCell;
-use usb_audio_class::{AudioClass, State};
+use usb_audio_class::{AudioClass, State, UAC_Status};
 
 mod audio;
 mod usb_audio_class;
@@ -104,21 +105,23 @@ async fn usb_samples_task(
     let mut cnt = 1;
     let mut fb_cnt = 0;
     let mut total = 0;
-    let (mut tx, mut rx) = uac.split();
 
+    let (mut tx, mut rx) = uac.split();
     loop {
         info!("Wait for USB Audio samples");
         status_pin.set_high();
-        i2s.stop();
-        i2s.clear();
+        tx.wait_connection().await;
         rx.wait_connection().await;
-        i2s.start();
+
+        error!("Next step");
+
         status = I2SStatus::Buffering(NonZeroU8::new(1).expect("Should fit!"));
 
         loop {
             let ret = timer2::SOF.load(core::sync::atomic::Ordering::Relaxed);
             let ret = ret.to_le_bytes();
             cnt += 1;
+
             match select(
                 rx.read_packet(packet_buf.as_mut_ptr()),
                 tx.write_packet(&ret[0..3]),
@@ -138,7 +141,7 @@ async fn usb_samples_task(
                                 match NonZeroU8::new(u8::from(*n) - 1) {
                                     None => {
                                         status = I2SStatus::Running;
-                                        // i2s.start();
+                                        i2s.start();
                                         info!("\tStart I2s!\n\n");
                                     }
                                     Some(val) => {
@@ -149,9 +152,10 @@ async fn usb_samples_task(
                             }
                         };
                         if remain.is_err() {
-                            // error!("Sample buffer overrun!");
+                            error!("Sample buffer overrun!");
                         }
-                        if n != 192 {
+
+                        if cnt == 1000 {
                             info!(
                                 "GOT: {} BL {} S {} T {} R {}",
                                 n,
@@ -160,13 +164,12 @@ async fn usb_samples_task(
                                 total,
                                 remain
                             );
-                            // cnt = 1000;
+                            cnt = 0;
                             total = 0;
                         }
                     }
                     Err(e) => {
-                        i2s.stop();
-                        info!("Stop I2s: Read: {:?}", e);
+                        error!("Read: {:?}", e);
                         break;
                     }
                 },
@@ -174,6 +177,7 @@ async fn usb_samples_task(
                     fb_cnt += 1;
                     if let Err(e) = ret {
                         error!("Write: {:?}", e);
+                        break;
                     }
                 }
             }
@@ -191,6 +195,10 @@ async fn usb_samples_task(
                 fb_cnt = 0;
             }
         }
+        error!("Stop I2s");
+        i2s.stop();
+        error!("Stop I2s DONE");
+        // i2s.clear();
     }
 }
 
@@ -327,8 +335,6 @@ async fn main(spawner: Spawner) {
     // Run the USB device.
     unwrap!(spawner.spawn(usb_runner(usb)));
     info!("write done");
-
-    Timer::after(Duration::from_millis(10)).await;
 
     // unwrap!(spawner.spawn(usb_samples_task(class, sample_chan.sender())));
     unwrap!(spawner.spawn(usb_samples_task(class, i2s, status_pin)));

@@ -15,6 +15,9 @@ use core::{
     task::Poll,
 };
 
+use embassy_sync::channel::Sender as ChSender;
+use embassy_sync::{blocking_mutex::raw::NoopRawMutex, channel::Channel};
+
 use crate::{
     audio::{
         common::{ACSRC, EPCS, FUCS},
@@ -86,6 +89,13 @@ const MS_HEADER_SUBTYPE: u8 = 0x01;
 const MS_GENERAL: u8 = 0x01;
 const PROTOCOL_NONE: u8 = 0x00;
 
+#[derive(Debug, Clone, Copy)]
+pub enum UAC_Status {
+    Idle,
+    Reset,
+    Active,
+}
+
 /// Packet level implementation of a USB MIDI device.
 ///
 /// This class can be used directly and it has the least overhead due to directly reading and
@@ -101,6 +111,7 @@ const PROTOCOL_NONE: u8 = 0x00;
 pub struct AudioClass<'d, D: Driver<'d>> {
     read_ep: D::EndpointOut,
     write_ep: D::EndpointIn,
+    control: &'d ControlShared,
 }
 
 impl<'d, D: Driver<'d>> AudioClass<'d, D> {
@@ -318,7 +329,19 @@ impl<'d, D: Driver<'d>> AudioClass<'d, D> {
         AudioClass {
             read_ep: samples_ep,
             write_ep: sync_ep,
+            control: &state.shared,
         }
+    }
+
+    /// Waits for both IN and OUT endpoints to be enabled.
+    pub async fn ready(&mut self) {
+        self.read_ep.wait_enabled().await;
+        self.write_ep.wait_enabled().await;
+    }
+
+    pub async fn changed(&self) -> UAC_Status {
+        self.control.changed().await;
+        self.control.status.get()
     }
 
     /// Gets the maximum packet size in bytes.
@@ -440,6 +463,7 @@ struct ControlShared {
     sr: Cell<Option<NonZeroU32>>,
     vol: Cell<u16>,
     mute: Cell<bool>,
+    status: Cell<UAC_Status>,
 }
 
 impl Default for ControlShared {
@@ -450,12 +474,13 @@ impl Default for ControlShared {
             vol: Cell::new(100),
             mute: Cell::new(false),
             sr: Cell::new(None),
+            status: Cell::new(UAC_Status::Idle),
         }
     }
 }
 
 impl ControlShared {
-    async fn changed(&self) {
+    pub async fn changed(&self) {
         poll_fn(|cx| {
             if self.changed.load(Ordering::Relaxed) {
                 self.changed.store(false, Ordering::Relaxed);
@@ -481,6 +506,7 @@ impl<'d> Handler for Control<'d> {
         let shared = self.shared();
 
         shared.changed.store(true, Ordering::Relaxed);
+        shared.status.set(UAC_Status::Reset);
         shared.waker.borrow_mut().wake();
     }
 
@@ -654,6 +680,18 @@ impl<'d> Handler for Control<'d> {
 
     fn enabled(&mut self, enabled: bool) {
         info!("EN: {}", enabled);
+
+        self.shared.changed.store(true, Ordering::Relaxed);
+        let shared = self.shared();
+
+        shared.changed.store(true, Ordering::Relaxed);
+        let status = if enabled {
+            UAC_Status::Active
+        } else {
+            UAC_Status::Idle
+        };
+        shared.status.set(status);
+        shared.waker.borrow_mut().wake();
     }
 
     fn configured(&mut self, configured: bool) {
