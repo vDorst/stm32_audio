@@ -7,13 +7,12 @@ use embassy_stm32::pac::timer::vals::{CcmrInputCcs, Dir, FilterValue};
 use embassy_stm32::pac::timer::TimGp32;
 use embassy_stm32::pac::RCC;
 use embassy_stm32::peripherals::TIM2;
-use embassy_stm32::rcc::low_level::RccPeripheral;
-use embassy_stm32::timer::low_level::{GeneralPurpose16bitInstance, GeneralPurpose32bitInstance};
-use embassy_stm32::timer::{CaptureCompare32bitInstance, Channel, InputTISelection};
+use embassy_stm32::timer::low_level::{InputTISelection, Timer};
+use embassy_stm32::timer::{AdvancedInstance1Channel, Channel, Channel1Pin, CoreInstance};
 use embassy_stm32::{interrupt, PeripheralRef, Peripherals};
 use static_cell::StaticCell;
 
-pub struct CCTIM2(pub PeripheralRef<'static, TIM2>);
+pub struct CCTIM2(pub Timer<'static, TIM2>);
 
 pub static SOF: AtomicU32 = AtomicU32::new(0);
 
@@ -32,7 +31,7 @@ pub enum ITR1_RMP {
 
 impl CCTIM2 {
     pub fn new(timer2: PeripheralRef<'static, TIM2>, inp: ITR1_RMP) -> Self {
-        let tmr2 = TIM2::regs_gp32();
+        let timer2 = Timer::new(timer2);
 
         // Reset timer
         RCC.apb1rstr().modify(|w| w.set_tim2rst(true));
@@ -40,6 +39,8 @@ impl CCTIM2 {
 
         // Enable timer
         RCC.apb1enr().modify(|w| w.set_tim2en(true));
+
+        let tmr2 = timer2.regs_gp32();
 
         tmr2.ccer().modify(|w| w.set_cce(0, false));
 
@@ -49,12 +50,13 @@ impl CCTIM2 {
 
         // Set TIM2 option register (TIM2_OR): See `RM0368`
         {
-            let tmr2_or = unsafe { tmr2.as_ptr().byte_add(0x50) }.cast::<ITR1_RMP>();
+            let tmr2_or = tmr2.or().as_ptr().cast::<ITR1_RMP>();
+            // SAFETY: This is save because `ITR1_RMP` is also u32.
             unsafe { *tmr2_or = inp };
         }
 
         // fCK_PSC / (PSC[15:0] + 1)
-        tmr2.psc().write(|w| w.set_psc(0));
+        tmr2.psc().write_value(0);
 
         tmr2.smcr().modify(|r| {
             r.set_ece(false);
@@ -74,27 +76,24 @@ impl CCTIM2 {
         // Enable timer
         tmr2.cr1().modify(|w| w.set_cen(true));
 
-        // enable interrupt
-        tmr2.dier().modify(|w| w.set_ccie(0, true));
+        // Clear status register
+        tmr2.sr().write(|r| r.0 = 0x0000_0000);
 
-        // Dump timer registers
-        for reg in (0..0x24).step_by(4) {
-            let val = unsafe { tmr2.as_ptr().byte_add(reg) }.cast::<u32>();
-            println!("TIM2: addr {:08x} = {:08x} ", val, unsafe { *val });
-        }
+        // enable interrupt
+        timer2.enable_input_interrupt(Channel::Ch1, true);
 
         CCTIM2(timer2)
     }
 
     #[allow(dead_code, clippy::unused_self)]
     pub fn get_counter(&self) -> u32 {
-        let tmr2 = TIM2::regs_gp32();
+        let tmr2 = self.0.regs_gp32();
         tmr2.cnt().read()
     }
 
     #[allow(dead_code, clippy::unused_self)]
     pub fn get_cc1(&self) -> u32 {
-        let tmr2 = TIM2::regs_gp32();
+        let tmr2 = self.0.regs_gp32();
         tmr2.ccr(0).read()
     }
 }
@@ -107,7 +106,7 @@ unsafe fn TIM2() {
 
     static mut CNT: usize = 0;
 
-    let tmr2 = TIM2::regs_gp32();
+    let tmr2 = unsafe { crate::pac::timer::TimGp32::from_ptr(TIM2::regs()) };
 
     if tmr2.sr().read().ccif(0) {
         let old = *LAST;
@@ -142,6 +141,6 @@ unsafe fn TIM2() {
         let val = unsafe { tmr2.as_ptr().byte_add(0x10) }.cast::<u32>();
         defmt::error!("IRQ TMR2: SR: 0x{:08x}", val);
     }
-    // We don't need to clear the timer capture interrupt.
+    // Note: We don't need to clear the timer capture interrupt.
     // It's cleared by hardware by reading the capture register.
 }
