@@ -5,8 +5,8 @@ use embassy_usb::driver::{Driver, Endpoint, EndpointError, EndpointIn, EndpointO
 pub enum USBTerminalTypes {
     /// USB Terminal, undefined Type.
     Undefined = 0x0100,
-    /// A Terminal dealing with a signal carried over an endpoint in an AudioStreaming interface.
-    /// The AudioStreaming interface descriptor points to the associated Terminal through the `bTerminalLink` field.
+    /// A Terminal dealing with a signal carried over an endpoint in an `AudioStreaming` interface.
+    /// The `AudioStreaming` interface descriptor points to the associated Terminal through the `bTerminalLink` field.
     Streaming = 0x0101,
     /// A Terminal dealing with a signal carried over a vendor-specific interface.
     /// The vendor-specific interface descriptor must contain a field that references the Terminal.

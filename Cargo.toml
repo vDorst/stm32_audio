@@ -7,10 +7,10 @@ edition = "2021"
 
 [dependencies]
 embassy-stm32 = { version = "0.1.0", path = "../embassy/embassy-stm32", features = ["defmt", "stm32f401cc", "unstable-pac", "memory-x", "time-driver-tim3", "exti", "chrono", "low-power"]  }
-embassy-sync = { version = "0.5.0", path = "../embassy/embassy-sync", features = ["defmt"] }
+embassy-sync = { version = "0.6.0", path = "../embassy/embassy-sync", features = ["defmt"] }
 embassy-executor = { version = "0.5.0", path = "../embassy/embassy-executor", features = ["task-arena-size-32768", "arch-cortex-m", "executor-thread", "executor-interrupt", "defmt", "integrated-timers"] }
 embassy-time = { version = "0.3", path = "../embassy/embassy-time", features = ["defmt", "defmt-timestamp-uptime", "tick-hz-32_768"] }
-embassy-usb = { version = "0.1.0", path = "../embassy/embassy-usb", features = ["defmt" ] }
+embassy-usb = { version = "0.2.0", path = "../embassy/embassy-usb", features = ["defmt" ] }
 embassy-futures = "0.1.1"
 
 defmt = "0.3"
@@ -21,9 +21,9 @@ cortex-m-rt = "0.7.3"
 embedded-hal = "1.0.0"
 embedded-io = { version = "0.6.1" }
 embedded-io-async = { version = "0.6.1" }
-panic-probe = { version = "0.3", features = ["print-defmt"] }
+panic-probe = { version = "0.3.2", features = ["print-defmt"] }
 heapless = { version = "0.8", default-features = false }
-static_cell = "2.0"
+static_cell = "2.1.0"
 
 [profile.dev]
 incremental = false

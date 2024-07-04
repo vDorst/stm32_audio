@@ -26,10 +26,11 @@ use crate::{
     Builder,
 };
 
-use defmt::{debug, info};
+use defmt::{debug, error, info};
 use embassy_sync::waitqueue::WakerRegistration;
 use embassy_usb::{
     control::{self, InResponse, OutResponse, Recipient, Request, RequestType},
+    descriptor::EndpointConfig,
     driver::{Driver, Endpoint, EndpointError, EndpointIn, EndpointOut},
     types::InterfaceNumber,
     Handler,
@@ -284,13 +285,16 @@ impl<'d, D: Driver<'d>> AudioClass<'d, D> {
             ],
         );
 
+        let ep_cfg = EndpointConfig {
+            isochronous: Some((
+                embassy_usb::descriptor::IsochronousSynchronizationType::Asynchronous,
+                embassy_usb::descriptor::IsochronousUsageType::Data,
+            )),
+            extra_data: &[0, 0x81],
+        };
+
         // Standard AS Isochronous Audio Data Endpoint Descriptor
-        let samples_ep = if1_alt1.endpoint_isochronous_out(
-            max_packet_size,
-            1,
-            embassy_usb::driver::IsochronousSynchronizationType::Asynchronous,
-            embassy_usb::driver::IsochronousUsageType::Data,
-        );
+        let samples_ep = if1_alt1.endpoint_isochronous_out(max_packet_size, 1, Some(&ep_cfg));
 
         //Audio Streaming Class Specific Audio Data Endpoint Descriptor
         if1_alt1.descriptor(
@@ -304,12 +308,15 @@ impl<'d, D: Driver<'d>> AudioClass<'d, D> {
             ],
         );
 
-        let sync_ep = if1_alt1.endpoint_isochronous_in(
-            3,
-            1,
-            embassy_usb::driver::IsochronousSynchronizationType::NoSynchronization,
-            embassy_usb::driver::IsochronousUsageType::Feedback,
-        );
+        let ep_cfg = EndpointConfig {
+            isochronous: Some((
+                embassy_usb::descriptor::IsochronousSynchronizationType::NoSynchronization,
+                embassy_usb::descriptor::IsochronousUsageType::Feedback,
+            )),
+            extra_data: &[4, 0],
+        };
+
+        let sync_ep = if1_alt1.endpoint_isochronous_in(3, 1, Some(&ep_cfg));
 
         // Standard AS Isochronous Audio Data Endpoint Descriptor
         // let rate_ep = alt.endpoint_interrupt_in(3, 1);
@@ -524,13 +531,17 @@ impl<'d> Handler for Control<'d> {
         // }
         let what = (req.value >> 8) as u8;
 
+        info!("CO: {}", req);
+
         let Some(acsrc) = ACSRC::try_from(req.request) else {
+            error!("ACSRC: {}", req.request);
             return Some(OutResponse::Rejected);
         };
 
         match req.recipient {
             Recipient::Interface => {
                 let Some(fucs) = FUCS::try_from(what) else {
+                    error!("FUCS: {}", what);
                     return Some(OutResponse::Rejected);
                 };
 

@@ -19,8 +19,8 @@ use embassy_stm32::i2c::{Config as I2CConfig, I2c};
 use embassy_stm32::peripherals::USB_OTG_FS;
 use embassy_stm32::spi::{Config as SPIConfig, Polarity, Spi};
 use embassy_stm32::time::Hertz;
-use embassy_stm32::usb_otg::Driver;
-use embassy_stm32::{bind_interrupts, i2c, pac, peripherals, usb_otg, Config, Peripheral};
+use embassy_stm32::usb::Driver;
+use embassy_stm32::{bind_interrupts, i2c, pac, peripherals, usb, Config, Peripheral};
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_sync::channel::{self, Channel, Sender};
 use embassy_sync::mutex::Mutex;
@@ -39,12 +39,10 @@ use embassy_usb::Builder;
 bind_interrupts!(struct Irqs {
     I2C1_EV => i2c::EventInterruptHandler<peripherals::I2C1>;
     I2C1_ER => i2c::ErrorInterruptHandler<peripherals::I2C1>;
-    OTG_FS => usb_otg::InterruptHandler<peripherals::USB_OTG_FS>;
+    OTG_FS => usb::InterruptHandler<peripherals::USB_OTG_FS>;
 });
 
-use embassy_stm32::i2s::{
-    ClockPolarity, Config as I2SConfig, Format, Function, Mode, Standard, I2S,
-};
+use embassy_stm32::i2s::{ClockPolarity, Config as I2SConfig, Format, Mode, Standard, I2S};
 use static_cell::StaticCell;
 use usb_audio_class::{AudioClass, State, UAC_Status};
 
@@ -77,7 +75,6 @@ async fn usb_runner(mut usb: embassy_usb::UsbDevice<'static, Driver<'static, USB
 // Create embassy-usb DeviceBuilder using the driver and config.
 // It needs some buffers for building the descriptors.
 static EP_OUT_BUFFER: StaticCell<[u8; 512]> = StaticCell::new();
-static DEVICE_DESC: StaticCell<[u8; 256]> = StaticCell::new();
 static CONFIG_DESC: StaticCell<[u8; 256]> = StaticCell::new();
 static BOS_DESC: StaticCell<[u8; 256]> = StaticCell::new();
 static CONTROL_BUF: StaticCell<[u8; 256]> = StaticCell::new();
@@ -97,7 +94,7 @@ enum I2SStatus {
 #[embassy_executor::task]
 async fn usb_samples_task(
     uac: AudioClass<'static, Driver<'static, USB_OTG_FS>>,
-    mut i2s: I2S<'static, peripherals::SPI3, u16>,
+    mut i2s: I2S<'static, u16>,
     mut status_pin: Output<'static>,
 ) {
     let mut status;
@@ -110,6 +107,7 @@ async fn usb_samples_task(
     loop {
         info!("Wait for USB Audio samples");
         status_pin.set_high();
+
         tx.wait_connection().await;
         rx.wait_connection().await;
 
@@ -133,28 +131,28 @@ async fn usb_samples_task(
                         status_pin.toggle();
                         total += n;
                         let buf_orig = &packet_buf.0[0..n / 2];
-                        let remain = match &mut status {
-                            I2SStatus::Running => i2s.write(buf_orig).await,
-                            I2SStatus::Buffering(n) => {
-                                // Write samples to buffer
-                                let ret = i2s.write_immediate(buf_orig);
-                                match NonZeroU8::new(u8::from(*n) - 1) {
-                                    None => {
-                                        status = I2SStatus::Running;
-                                        i2s.start();
-                                        info!("\tStart I2s!\n\n");
-                                    }
-                                    Some(val) => {
-                                        *n = val;
-                                    }
-                                }
-                                ret
-                            }
-                        };
-                        if remain.is_err() {
-                            error!("Sample buffer overrun!");
-                        }
-
+                        // let remain = match &mut status {
+                        //     I2SStatus::Running => i2s.write(buf_orig).await,
+                        //     I2SStatus::Buffering(n) => {
+                        //         // Write samples to buffer
+                        //         let ret = i2s.write(buf_orig).await;
+                        //         match NonZeroU8::new(u8::from(*n) - 1) {
+                        //             None => {
+                        //                 status = I2SStatus::Running;
+                        //                 // i2s.start();
+                        //                 info!("\tStart I2s!\n\n");
+                        //             }
+                        //             Some(val) => {
+                        //                 *n = val;
+                        //             }
+                        //         }
+                        //         ret
+                        //     }
+                        // };
+                        // if remain.is_err() {
+                        //     error!("Sample buffer overrun!");
+                        // }
+                        let remain = 0;
                         if cnt == 1000 {
                             info!(
                                 "GOT: {} BL {} S {} T {} R {}",
@@ -195,9 +193,9 @@ async fn usb_samples_task(
                 fb_cnt = 0;
             }
         }
-        error!("Stop I2s");
-        i2s.stop();
-        error!("Stop I2s DONE");
+        // error!("Stop I2s");
+        // i2s.stop();
+        // error!("Stop I2s DONE");
         // i2s.clear();
     }
 }
@@ -266,14 +264,15 @@ async fn main(spawner: Spawner) {
     i2s_cfg.clock_polarity = ClockPolarity::IdleLow;
     i2s_cfg.mode = Mode::Master;
     i2s_cfg.standard = Standard::Philips;
-    i2s_cfg.function = Function::Transmit;
 
-    let i2s = I2S::new_no_mck(
+    // i2s_cfg.function = Function::Transmit;
+
+    let i2s = I2S::new_txonly_nomclk(
         p.SPI3,
         p.PB5,      // sd - DAta (Sample Data)
         p.PA15,     // ws - LRCK ( Data L/R )
         p.PB3,      // ck - SCK (Sample clock)
-        p.DMA1_CH7, // Chab 0 SPI3_TX
+        p.DMA1_CH7, // Chan 0 SPI3_TX
         SAMPLE_DMABUF.init([0; SAMPLES]),
         Hertz(48_000),
         i2s_cfg,
@@ -291,7 +290,7 @@ async fn main(spawner: Spawner) {
     // unsafe { NVIC::unmask(pac::interrupt::DMA1_STREAM7) };
     // unsafe { NVIC::unmask(pac::interrupt::SPI3) };
 
-    let mut config = embassy_stm32::usb_otg::Config::default();
+    let mut config = embassy_stm32::usb::Config::default();
     config.vbus_detection = false;
     let driver = Driver::new_fs(
         p.USB_OTG_FS,
@@ -320,7 +319,6 @@ async fn main(spawner: Spawner) {
     let mut builder = Builder::new(
         driver,
         config,
-        DEVICE_DESC.init([0; 256]),
         CONFIG_DESC.init([0; 256]),
         BOS_DESC.init([0; 256]),
         &mut [], // no msos descriptors
@@ -340,29 +338,29 @@ async fn main(spawner: Spawner) {
     unwrap!(spawner.spawn(usb_samples_task(class, i2s, status_pin)));
 
     loop {
-        // class.wait_connection().await;
-        // info!("EP Connected");
+        //     // class.wait_connection().await;
+        //     // info!("EP Connected");
         led_status.toggle();
 
         Timer::after_millis(500).await;
 
-        // //nfo!("write I2S {}", n);
-        // for n in 0u32..1000 {
-        //     let mut buf: TSamples = Vec::new();
-        //     for _ in 0..32 {
-        //         buf.push(sm.next().copied().unwrap()).unwrap();
+        //     //nfo!("write I2S {}", n);
+        //     for n in 0u32..1000 {
+        //         let mut buf: TSamples = Vec::new();
+        //         for _ in 0..32 {
+        //             buf.push(sm.next().copied().unwrap()).unwrap();
+        //         }
+
+        //         //i2s.writer(&write);
+        //         match select(sample_chan.send(buf), Timer::after_millis(1000)).await {
+        //             Either::First(_) => {}
+        //             Either::Second(()) => {
+        //                 println!("Timer");
+        //             }
+        //         };
         //     }
 
-        //     //i2s.writer(&write);
-        //     match select(sample_chan.send(buf), Timer::after_millis(1000)).await {
-        //         Either::First(_) => {}
-        //         Either::Second(()) => {
-        //             println!("Timer");
-        //         }
-        //     };
-        // }
-
-        // println!("Send");
+        //     println!("Send");
         // // Start Conv.
         // unwrap!(
         //     i2c_temp

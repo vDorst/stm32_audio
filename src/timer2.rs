@@ -21,11 +21,11 @@ pub static SOF: AtomicU32 = AtomicU32::new(0);
 /// TIM2: Option register Internal trigger 1 remap
 pub enum ITR1_RMP {
     Reserved = 0b00 << 10,
-    /// PTP trigger output is connected to TIM2_ITR1
+    /// PTP trigger output is connected to `TIM2_ITR1`
     PTP_TRG_OUT = 0b01 << 10,
-    /// OTG FS SOF is connected to the TIM2_ITR1 input
+    /// OTG FS SOF is connected to the `TIM2_ITR1` input
     OTG_FS_SOF = 0b10 << 10,
-    /// OTG HS SOF is connected to the TIM2_ITR1 input
+    /// OTG HS SOF is connected to the `TIM2_ITR1` input
     OTG_HS_SOF = 0b11 << 10,
 }
 
@@ -41,6 +41,8 @@ impl CCTIM2 {
         RCC.apb1enr().modify(|w| w.set_tim2en(true));
 
         let tmr2 = timer2.regs_gp32();
+
+        println!("tmr2: {:08x}", tmr2.as_ptr());
 
         tmr2.ccer().modify(|w| w.set_cce(0, false));
 
