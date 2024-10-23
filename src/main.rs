@@ -8,8 +8,8 @@ use embassy_executor::Spawner;
 use embassy_stm32::gpio::{Input, Level, Output, Pull, Speed};
 use embassy_stm32::i2s::{ClockPolarity, Config as I2SConfig, Format, Mode, Standard, I2S};
 use embassy_stm32::rcc::mux;
-use embassy_stm32::spi::Word;
 use embassy_stm32::time::Hertz;
+use embassy_stm32::timer::low_level::FilterValue;
 use embassy_stm32::{bind_interrupts, interrupt, peripherals, timer, usb, Config};
 use embassy_sync::blocking_mutex::raw::{CriticalSectionRawMutex, NoopRawMutex};
 use embassy_sync::blocking_mutex::Mutex;
@@ -153,7 +153,7 @@ async fn audio_receiver_task(
         let samples = usb_audio_receiver.receive().await;
         // Use the samples, for example play back via the SAI peripheral.
 
-        i2s.write(&samples).await;
+        let _ = i2s.write(samples).await;
 
         // Notify the channel that the buffer is now ready to be reused
         usb_audio_receiver.receive_done();
@@ -237,17 +237,64 @@ async fn usb_control_task(control_monitor: speaker::ControlMonitor<'static>) {
 /// This gives an (ideal) counter value of 336.000 for every update of the `FEEDBACK_SIGNAL`.
 #[interrupt]
 fn TIM2() {
+    static mut VALUES: [u32; 4] = [48000_u32; 4];
+    static mut IDX: usize = 0;
+    static mut LAST: u32 = 0;
+
+    static mut CNT: usize = 0;
+
     static mut LAST_TICKS: u32 = 0;
     static mut FRAME_COUNT: usize = 0;
 
     let ticks = critical_section::with(|cs| {
-        let timer = TIMER.borrow(cs).borrow().as_ref().unwrap().regs_gp32();
+        let tmr2 = TIMER.borrow(cs).borrow().as_ref().unwrap().regs_gp32();
+
+        let status = tmr2.sr().read();
+        if status.ccif(0) {
+            let old = *LAST;
+            *LAST = tmr2.ccr(0).read();
+
+            let diff = (*LAST).wrapping_sub(old);
+            VALUES[*IDX] = diff;
+            *IDX = (*IDX + 1) & 0x3;
+
+            let avg: u32 = VALUES.iter().sum();
+            let mul = avg.checked_mul(256).unwrap_or(48000_u32 * 4);
+
+            let fb: u32 = (mul / 1000) << 6;
+
+            if *CNT >= 1000 {
+                *CNT = 0;
+                let val = unsafe { tmr2.as_ptr().byte_add(0x10) }.cast::<u32>();
+                println!(
+                    "SOF: C {}: A {} {=14..24} + {=0..14}/16384 SR: {:08x}",
+                    diff,
+                    avg,
+                    fb,
+                    fb,
+                    unsafe { *val },
+                );
+            }
+            *CNT += 1;
+
+            // SOF.store(fb, core::sync::atomic::Ordering::Relaxed);
+        }
+
+        // for t in 1..4 {
+        //     if status.ccif(t) {
+        //         let _ = tmr2.ccr(t).read();
+        //         // let int = tmr2.sr().read();
+        //         let sr = unsafe { *(tmr2.as_ptr().byte_add(0x10).cast::<u32>()) };
+        //         let dier = unsafe { *(tmr2.as_ptr().byte_add(0x0C).cast::<u32>()) };
+        //         defmt::error!("IRQ TMR2: {} SR: {:08x} DIER {:08x}", t, sr, dier);
+        //     }
+        // }
 
         // Read timer counter.
-        let ticks = timer.cnt().read();
+        let ticks: u32 = tmr2.cnt().read();
 
         // Clear trigger interrupt flag.
-        timer.sr().modify(|r| r.set_tif(false));
+        tmr2.sr().modify(|r| r.set_tif(false));
 
         ticks
     });
@@ -384,8 +431,8 @@ async fn main(spawner: Spawner) {
         i2s_cfg,
     );
 
+    // Fix I2S clock rate.
     let ptr = 0x4000_3C00 as *mut u32;
-
     unsafe { *(ptr.byte_add(0x20)) = 0x010C };
 
     info!("Read out I2S");
@@ -447,12 +494,26 @@ async fn main(spawner: Spawner) {
     let channel = CHANNEL.init(zerocopy_channel::Channel::new(sample_blocks));
     let (sender, receiver) = channel.split();
 
-    // Run a timer for counting between SOF interrupts.
+    // Use the SOF signal to create a capture on Channel 1 of Timer2 and generate a interrupt.
     let mut tim2 = timer::low_level::Timer::new(p.TIM2);
+    tim2.enable_channel(timer::Channel::Ch1, false);
+
     tim2.set_tick_freq(Hertz(FEEDBACK_COUNTER_TICK_RATE));
     tim2.set_trigger_source(timer::low_level::TriggerSource::ITR1); // The USB SOF signal.
-    tim2.set_slave_mode(timer::low_level::SlaveMode::TRIGGER_MODE);
-    tim2.regs_gp16().dier().modify(|r| r.set_tie(true)); // Enable the trigger interrupt.
+
+    tim2.set_input_ti_selection(timer::Channel::Ch1, timer::low_level::InputTISelection::TRC);
+    tim2.set_input_capture_prescaler(timer::Channel::Ch1, 0);
+    tim2.set_input_capture_filter(timer::Channel::Ch1, FilterValue::FCK_INT_N2);
+
+    // See RM0368 TIM2 option register (TIM2_OR)
+    tim2.regs_gp32().or().write(|r| *r = 0b10 << 10);
+
+    tim2.regs_gp32().sr().write(|r| r.0 = 0);
+
+    tim2.enable_channel(timer::Channel::Ch1, true);
+    // enable interrupt
+    tim2.enable_input_interrupt(timer::Channel::Ch1, true);
+
     tim2.start();
 
     TIMER.lock(|p| p.borrow_mut().replace(tim2));
